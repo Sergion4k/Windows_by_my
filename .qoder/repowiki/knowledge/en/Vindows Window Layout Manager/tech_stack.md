@@ -1,0 +1,1 @@
+WPF (.NET) for the UI; Windows P/Invoke via Win32.cs for native window enumeration and positioning; XAML + code-behind MVVM pattern with view models in the root namespace.

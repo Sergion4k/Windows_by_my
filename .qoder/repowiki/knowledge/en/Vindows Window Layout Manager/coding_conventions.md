@@ -1,0 +1,3 @@
+- Cross-cutting domain types are centralized in Core/Models.cs and consumed by both UI view models and Core services.
+- Native Windows interop is isolated in Core/Win32.cs so UI and higher-level logic never call P/Invoke directly.
+- Per-zone state is exposed through dedicated view-model classes (e.g. ZoneVM) that wrap Core layout operations.

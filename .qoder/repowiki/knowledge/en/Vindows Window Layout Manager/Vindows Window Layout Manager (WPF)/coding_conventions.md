@@ -1,0 +1,5 @@
+- Platform-specific Win32 interop is centralized in a single `internal static Win32` class with `[DllImport]` declarations, keeping all `user32.dll`/`dwmapi.dll` calls out of UI code.
+- Layout geometry is stored as percentages of the monitor work area in `Zone.X/Y/Width/Height`, then converted to physical pixels at apply time via `LayoutApplier.ZoneToPixelRect`.
+- Data models use C# primary constructors with `required` properties and `init`-only setters for immutable snapshot types like `MonitorInfo` and `WindowInfo`.
+- UI state is bound through `ObservableCollection<T>` exposed as read-only public properties (e.g. `Windows`) so XAML bindings update automatically when items change.
+- Persistence methods wrap file I/O in try/catch blocks that silently fall back to defaults or in-memory state rather than throwing to the UI.

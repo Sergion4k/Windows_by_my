@@ -1,0 +1,27 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: en-US
+branch: Q0DeR-MaG1C-BrAnCh-Fo2-NoN-GiT-Or-No-C0MmIt
+nodes_managed: true
+exported_at: "2026-09-13T00:18:53Z"
+modules:
+    "":
+        dir_name: Vindows Window Layout Manager
+        title: Vindows Window Layout Manager
+        scope:
+            - Vindows/
+            - .gitignore
+        source_files: []
+        children:
+            - vindows_app
+        depends_on: []
+        related_to: []
+    vindows_app:
+        dir_name: Vindows Window Layout Manager (WPF)
+        title: Vindows Window Layout Manager (WPF)
+        scope:
+            - Vindows/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []

@@ -1,0 +1,1 @@
+.NET 10 WPF (`net10.0-windows`, `UseWPF=true`), P/Invoke to `user32.dll` and `dwmapi.dll` for monitor/window management, `System.Text.Json` for layout persistence, `System.ComponentModel.INotifyPropertyChanged` for zone binding.

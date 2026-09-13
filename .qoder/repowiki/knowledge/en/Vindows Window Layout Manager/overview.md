@@ -1,0 +1,1 @@
+WPF desktop application that defines per-monitor grid zones and programmatically positions assigned process windows across multi-monitor setups.

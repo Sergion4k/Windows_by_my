@@ -1,0 +1,1 @@
+Build and run as a standard .NET WPF app (`dotnet build` / `dotnet run`); requires Windows because it targets `net10.0-windows` and calls Win32 APIs. Layouts are auto-created on first run under `%APPDATA%\Vindows\layout.json`.

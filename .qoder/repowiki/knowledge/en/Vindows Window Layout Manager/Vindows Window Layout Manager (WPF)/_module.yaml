@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: vindows_app
+title: Vindows Window Layout Manager (WPF)
+scope:
+    - Vindows/
+source_files: []
+depends_on: []
+related_to: []
