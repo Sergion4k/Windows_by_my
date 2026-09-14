@@ -20,6 +20,7 @@ public sealed class WindowWatcher : IDisposable
     private List<WindowTarget> _targets = new();
     private List<MonitorLayout> _layouts = new();
     private List<MonitorInfo> _monitors = new();
+    private readonly HashSet<IntPtr> _moving = new();
     private bool _started;
 
     public WindowWatcher() => _callback = OnWinEvent;
@@ -74,9 +75,19 @@ public sealed class WindowWatcher : IDisposable
     {
         _layouts = layouts;
         _monitors = monitors;
-        var result = LayoutApplier.Apply(layouts, monitors, out var placed, _targets);
-        SetTargets(placed);
-        return result;
+        // Собственная расстановка тоже генерирует MOVESIZEEND — не перехватываем её в OnWinEvent.
+        var wasEnabled = Enabled;
+        Enabled = false;
+        try
+        {
+            var result = LayoutApplier.Apply(layouts, monitors, out var placed, _targets);
+            SetTargets(placed);
+            return result;
+        }
+        finally
+        {
+            Enabled = wasEnabled;
+        }
     }
 
     /// <summary>Заменяет карту контроля; окна, выпавшие из привязки, снимаются с «поверх всех».</summary>
@@ -132,18 +143,18 @@ public sealed class WindowWatcher : IDisposable
             var target = _targets.FirstOrDefault(t => t.Handle == hwnd);
             if (target.Handle == IntPtr.Zero) return;
 
-            if (!Win32.GetWindowRect(hwnd, out var r)) return;
+            // Собственный MoveTo тоже шлёт MOVESIZEEND — не реагируем на него.
+            if (_moving.Contains(hwnd)) return;
 
-            // Окно в своей области (с допуском) — не трогаем.
-            if (Math.Abs(r.Left - target.Rect.X) <= PositionTolerance &&
-                Math.Abs(r.Top - target.Rect.Y) <= PositionTolerance &&
-                Math.Abs((r.Right - r.Left) - target.Rect.Width) <= PositionTolerance &&
-                Math.Abs((r.Bottom - r.Top) - target.Rect.Height) <= PositionTolerance)
+            // Окно в своей видимой области (с допуском) — не трогаем.
+            if (LayoutApplier.IsAtTargetPosition(hwnd, target.Rect, PositionTolerance))
                 return;
+
+            var hostMonitor = _monitors.FirstOrDefault(m => m.DeviceName == target.Layout.DeviceName);
 
             // Окно утащили на другой монитор: возможно, там есть зона этого же приложения.
             // Пересопоставляем привязки вместо того, чтобы тянуть окно обратно на старый экран.
-            if (!LayoutApplier.IsOnMonitor(hwnd, target.WorkArea))
+            if (hostMonitor != null && !LayoutApplier.IsOnMonitor(hwnd, hostMonitor, _monitors))
             {
                 DebugLog.Line($"Watcher: {hwnd} ушёл с монитора зоны {target.Zone.Name} — повторное сопоставление");
                 Reapply(_layouts, _monitors);
@@ -151,7 +162,15 @@ public sealed class WindowWatcher : IDisposable
             }
 
             // Пользователь сдвинул/растянул привязанное окно — возвращаем в область (и снова поверх всех).
-            LayoutApplier.MoveTo(hwnd, target.Rect, topmost: true);
+            _moving.Add(hwnd);
+            try
+            {
+                LayoutApplier.MoveTo(hwnd, target.Rect, topmost: true);
+            }
+            finally
+            {
+                _moving.Remove(hwnd);
+            }
         }
         catch (Exception ex)
         {

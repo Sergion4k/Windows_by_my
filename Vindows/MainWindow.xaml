@@ -16,6 +16,7 @@
 
         <StackPanel Grid.Row="0" Orientation="Horizontal">
             <Button x:Name="RefreshBtn" Content="Обновить окна" Padding="10,4" Click="RefreshBtn_Click"/>
+            <Button x:Name="RefreshMonitorsBtn" Content="Обновить мониторы" Padding="10,4" Margin="8,0,0,0" Click="RefreshMonitorsBtn_Click"/>
             <Button x:Name="ApplyBtn" Content="Расставить окна" Padding="10,4" Margin="8,0,0,0" FontWeight="Bold" Click="ApplyBtn_Click"/>
             <CheckBox x:Name="ControlCheck" Content="Контроль окон" Margin="16,0,0,0" VerticalAlignment="Center"/>
             <Button x:Name="SaveBtn" Content="Сохранить раскладку" Padding="10,4" Margin="8,0,0,0" Click="SaveBtn_Click"/>
@@ -30,7 +31,7 @@
             </Grid.ColumnDefinitions>
 
             <GroupBox Header="Мониторы" Grid.Column="0">
-                <ListBox x:Name="MonitorsList" SelectionChanged="MonitorsList_SelectionChanged"/>
+                <ListBox x:Name="MonitorsList" DisplayMemberPath="DisplayName" SelectionChanged="MonitorsList_SelectionChanged"/>
             </GroupBox>
 
             <GroupBox Header="Разбиение выбранного монитора" Grid.Column="1" Margin="10,0">

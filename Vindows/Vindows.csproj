@@ -8,10 +8,19 @@
     <UseWPF>true</UseWPF>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Vindows.ico</ApplicationIcon>
+
+    <!-- Один exe для переноса: dotnet publish -c Release → ../dist/Vindows.exe -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishDir>$(MSBuildThisFileDirectory)..\dist\</PublishDir>
   </PropertyGroup>
 
   <ItemGroup>
     <Resource Include="Vindows.ico" />
+    <InternalsVisibleTo Include="Vindows.Tests" />
   </ItemGroup>
 
 </Project>

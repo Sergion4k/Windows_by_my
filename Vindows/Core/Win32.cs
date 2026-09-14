@@ -36,6 +36,13 @@ internal static class Win32
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+    public const uint MONITOR_DEFAULTTONULL = 0;
+    public const uint MONITOR_DEFAULTTOPRIMARY = 1;
+    public const uint MONITOR_DEFAULTTONEAREST = 2;
+
     /// <summary>Все мониторы системы с разрешением и рабочей областью (в физических пикселях).</summary>
     public static List<MonitorInfo> GetMonitors()
     {
@@ -56,8 +63,9 @@ internal static class Win32
                     var w = mi.rcWork;
                     monitors.Add(new MonitorInfo
                     {
+                        Handle = h,
                         DeviceName = mi.szDevice,
-                        DisplayName = $"Монитор {index + 1}: {b.Right - b.Left}×{b.Bottom - b.Top}",
+                        DisplayName = $"Монитор {index + 1}: {b.Right - b.Left}×{b.Bottom - b.Top} @ ({b.Left},{b.Top})",
                         Bounds = new Rect(b.Left, b.Top, b.Right - b.Left, b.Bottom - b.Top),
                         WorkArea = new Rect(w.Left, w.Top, w.Right - w.Left, w.Bottom - w.Top),
                     });
@@ -74,6 +82,15 @@ internal static class Win32
 
         EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, Callback, IntPtr.Zero);
         return monitors;
+    }
+
+    /// <summary>Монитор, на котором находится окно (по Win32, с учётом ближайшего при пересечении границ).</summary>
+    public static MonitorInfo? FindMonitorForWindow(IntPtr hwnd, IReadOnlyList<MonitorInfo> monitors)
+    {
+        if (hwnd == IntPtr.Zero || monitors.Count == 0) return null;
+        var hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (hMon == IntPtr.Zero) return null;
+        return monitors.FirstOrDefault(m => m.Handle == hMon);
     }
 
     // ---------- Окна ----------

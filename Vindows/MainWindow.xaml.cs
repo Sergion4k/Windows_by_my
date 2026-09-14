@@ -86,9 +86,11 @@ public partial class MainWindow : Window
         _monitors.AddRange(Win32.GetMonitors());
         DebugLog.Line($"Система сообщила о {_monitors.Count} мониторах: " +
             string.Join("; ", _monitors.Select(m => $"{m.DeviceName} [{m.DisplayName}]")));
-        var file = LayoutStore.Load();
-        DebugLog.Line($"Загружено раскладок из layout.json: {file.Monitors.Count} (Контроль окон: {file.ControlEnabled})");
-        _layouts.AddRange(file.Monitors);
+        // Каждый запуск начинается с пустых назначений и стандартной сетки.
+        // Сохранённая раскладка загружается только по кнопке «Загрузить».
+        var file = new LayoutFile();
+        _layouts.Clear();
+        DebugLog.Line("Новый сеанс: настройки по умолчанию, приложения не назначены");
         foreach (var m in _monitors)
             GetLayoutFor(m);
 
@@ -106,20 +108,8 @@ public partial class MainWindow : Window
         _watcher.Enabled = file.ControlEnabled;
         var hookOk = _watcher.Start();
 
-        string status;
-        if (file.ControlEnabled)
-        {
-            // Восстанавливаем привязку: пока программы не было, окна могли сдвинуть.
-            var result = ReapplyAll();
-            status = $"Мониторов: {_monitors.Count}. Привязка восстановлена — размещено окон: {result.Placed}." + ApplyNotes(result);
-        }
-        else
-        {
-            // Снимаем «поверх всех», если прошлый запуск завершился некорректно.
-            _watcher.ReleaseWindows();
-            _watcher.UpdateTargets(_layouts, _monitors);
-            status = $"Мониторов: {_monitors.Count}. Контроль окон выключен — окна свободны.";
-        }
+        _watcher.UpdateTargets(_layouts, _monitors);
+        string status = $"Мониторов: {_monitors.Count}. Новый сеанс: сетка 2×1, приложения не назначены.";
         if (!hookOk) status += "  ВНИМАНИЕ: хук не установился, контроль перемещения не работает.";
         StatusText.Text = status;
     }
@@ -393,11 +383,36 @@ public partial class MainWindow : Window
         StatusText.Text = $"Открытых окон: {_windows.Count - 1}";
     }
 
+    private void RefreshMonitorsBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedDevice = _currentMonitor?.DeviceName;
+        _monitors.Clear();
+        _monitors.AddRange(Win32.GetMonitors());
+        foreach (var m in _monitors)
+            GetLayoutFor(m);
+
+        MonitorsList.ItemsSource = null;
+        MonitorsList.ItemsSource = _monitors;
+        MonitorsList.SelectedItem = selectedDevice != null
+            ? _monitors.FirstOrDefault(m => m.DeviceName == selectedDevice) ?? _monitors.FirstOrDefault()
+            : _monitors.FirstOrDefault();
+
+        if (ControlCheck.IsChecked == true)
+        {
+            var result = ReapplyAll();
+            StatusText.Text = $"Мониторов: {_monitors.Count}. Перечитано из системы. Размещено окон: {result.Placed}." + ApplyNotes(result);
+        }
+        else
+        {
+            _watcher.UpdateTargets(_layouts, _monitors);
+            StatusText.Text = $"Мониторов: {_monitors.Count}. Список обновлён из системы.";
+        }
+    }
+
     private void ApplyBtn_Click(object sender, RoutedEventArgs e)
     {
         // Сначала расставляем (Apply сам получает актуальный список окон), затем обновляем UI.
         var result = ReapplyAll();
-        SaveLayouts();
         RefreshWindows();
 
         var text = $"Размещено окон: {result.Placed}.";
@@ -442,8 +457,6 @@ public partial class MainWindow : Window
             _watcher.ReleaseWindows();
             StatusText.Text = "Контроль выключен — окна можно свободно перемещать.";
         }
-
-        SaveLayouts();
     }
 
     private void LoadBtn_Click(object sender, RoutedEventArgs e)

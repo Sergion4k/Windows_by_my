@@ -5,6 +5,8 @@ namespace Vindows.Core;
 /// <summary>Физический монитор системы.</summary>
 public sealed class MonitorInfo
 {
+    public IntPtr Handle { get; init; }
+
     public required string DeviceName { get; init; }
     public required string DisplayName { get; init; }
 
@@ -13,6 +15,8 @@ public sealed class MonitorInfo
 
     /// <summary>Рабочая область — без панели задач (физические пиксели).</summary>
     public required Rect WorkArea { get; init; }
+
+    public override string ToString() => DisplayName;
 }
 
 /// <summary>Область экрана: координаты и размер в процентах от рабочей области.</summary>
