@@ -22,11 +22,31 @@ public sealed class WindowWatcher : IDisposable
     private List<MonitorInfo> _monitors = new();
     private readonly HashSet<IntPtr> _moving = new();
     private bool _started;
+    private readonly Dictionary<IntPtr, uint> _raisedWindows = new();
 
     public WindowWatcher() => _callback = OnWinEvent;
 
     /// <summary>Включает/выключает возврат окон в области.</summary>
     public bool Enabled { get; set; }
+    public bool KeepOnTop { get; private set; }
+    public MonitorMoveBehavior MonitorMoveBehavior { get; set; }
+    public event Action? StateChanged;
+
+    public void SetKeepOnTop(bool value)
+    {
+        KeepOnTop = value;
+        ApplyTopmost();
+    }
+
+    public void ForgetZone(Zone zone) => SetTargets(_targets.Where(t => t.Zone != zone).ToList());
+
+    public void RefreshControlStatus()
+    {
+        foreach (var t in _targets)
+            if (t.Zone.Status is "Окно размещено" or "Окно закреплено")
+                t.Zone.Status = Enabled ? "Окно закреплено" : "Окно размещено";
+        StateChanged?.Invoke();
+    }
 
     /// <summary>Устанавливает системный хук. Вызывать из потока UI (WPF) — у него есть очередь сообщений.
     /// Возвращает false, если хук не установился (контроль работать не будет).</summary>
@@ -67,7 +87,8 @@ public sealed class WindowWatcher : IDisposable
     {
         _layouts = layouts;
         _monitors = monitors;
-        SetTargets(LayoutApplier.BuildTargets(layouts, monitors, out _, _targets));
+        SetTargets(LayoutApplier.BuildTargets(layouts, monitors, out _, _targets,
+            MonitorMoveBehavior == MonitorMoveBehavior.ReturnToZone));
     }
 
     /// <summary>Расставляет окна с сохранением старых привязок и обновляет карту контроля.</summary>
@@ -80,13 +101,16 @@ public sealed class WindowWatcher : IDisposable
         Enabled = false;
         try
         {
-            var result = LayoutApplier.Apply(layouts, monitors, out var placed, _targets);
+            var result = LayoutApplier.Apply(layouts, monitors, out var placed, _targets,
+                MonitorMoveBehavior == MonitorMoveBehavior.ReturnToZone);
             SetTargets(placed);
+            ApplyTopmost();
             return result;
         }
         finally
         {
             Enabled = wasEnabled;
+            RefreshControlStatus();
         }
     }
 
@@ -96,32 +120,25 @@ public sealed class WindowWatcher : IDisposable
         var keep = newTargets.Select(t => t.Handle).ToHashSet();
         foreach (var old in _targets)
             if (!keep.Contains(old.Handle))
-                ClearTopmost(old.Handle);
+                RestoreTopmost(old.Handle);
 
         _targets = newTargets;
     }
 
-    /// <summary>Снимает «поверх всех окон» со всех привязанных окон (контроль выключен / закрытие программы).</summary>
+    /// <summary>Снимает только тот режим «поверх всех», который включила Vindows.</summary>
     public void ReleaseWindows()
     {
-        foreach (var t in _targets)
-        {
-            try
-            {
-                ClearTopmost(t.Handle);
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Line($"Watcher.ReleaseWindows {t.Handle}: {ex.Message}");
-            }
-        }
+        foreach (var hwnd in _raisedWindows.Keys.ToList()) RestoreTopmost(hwnd);
     }
 
-    private static void ClearTopmost(IntPtr hwnd)
+    private void RestoreTopmost(IntPtr hwnd)
     {
+        if (!_raisedWindows.Remove(hwnd, out var originalPid)) return;
         try
         {
             if (!Win32.IsWindow(hwnd)) return;
+            Win32.GetWindowThreadProcessId(hwnd, out var pid);
+            if (pid != originalPid) return;
             Win32.SetWindowPos(hwnd, Win32.HWND_NOTOPMOST, 0, 0, 0, 0,
                 Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
         }
@@ -130,6 +147,25 @@ public sealed class WindowWatcher : IDisposable
             DebugLog.Line($"Watcher.ClearTopmost {hwnd}: {ex.Message}");
         }
     }
+
+    private void ApplyTopmost()
+    {
+        if (!KeepOnTop) { ReleaseWindows(); return; }
+        foreach (var t in _targets)
+        {
+            if (!Win32.IsWindow(t.Handle) || Win32.IsTopmost(t.Handle)) continue;
+            Win32.GetWindowThreadProcessId(t.Handle, out var pid);
+            if (Win32.SetWindowPos(t.Handle, Win32.HWND_TOPMOST, 0, 0, 0, 0,
+                    Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE))
+                _raisedWindows[t.Handle] = pid;
+            else
+                t.Zone.Status = "Не удалось включить «Поверх всех» — проверьте права доступа";
+        }
+        StateChanged?.Invoke();
+    }
+
+    internal static bool ShouldReleaseAfterMove(MonitorMoveBehavior behavior, bool onAssignedMonitor) =>
+        behavior == MonitorMoveBehavior.ReleaseWindow && !onAssignedMonitor;
 
     private void OnWinEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
     {
@@ -152,12 +188,13 @@ public sealed class WindowWatcher : IDisposable
 
             var hostMonitor = _monitors.FirstOrDefault(m => m.DeviceName == target.Layout.DeviceName);
 
-            // Окно утащили на другой монитор: возможно, там есть зона этого же приложения.
-            // Пересопоставляем привязки вместо того, чтобы тянуть окно обратно на старый экран.
-            if (hostMonitor != null && !LayoutApplier.IsOnMonitor(hwnd, hostMonitor, _monitors))
+            // Отпущенное окно остаётся свободным до явной команды «Расставить окна».
+            if (hostMonitor != null && ShouldReleaseAfterMove(MonitorMoveBehavior,
+                    LayoutApplier.IsOnMonitor(hwnd, hostMonitor, _monitors)))
             {
-                DebugLog.Line($"Watcher: {hwnd} ушёл с монитора зоны {target.Zone.Name} — повторное сопоставление");
-                Reapply(_layouts, _monitors);
+                SetTargets(_targets.Where(t => t.Handle != hwnd).ToList());
+                target.Zone.Status = "Окно отпущено на другом мониторе — повторная привязка кнопкой «Расставить окна»";
+                StateChanged?.Invoke();
                 return;
             }
 
@@ -165,7 +202,15 @@ public sealed class WindowWatcher : IDisposable
             _moving.Add(hwnd);
             try
             {
-                LayoutApplier.MoveTo(hwnd, target.Rect, topmost: true);
+                if (LayoutApplier.MoveTo(hwnd, target.Rect))
+                {
+                    LayoutApplier.FitToWorkArea(hwnd, target.WorkArea);
+                    target.Zone.Status = LayoutApplier.IsAtTargetPosition(hwnd, target.Rect)
+                        ? "Окно закреплено" : "Окно не помещается в зону";
+                    ApplyTopmost();
+                }
+                else target.Zone.Status = "Не удалось вернуть окно в зону — проверьте права доступа";
+                StateChanged?.Invoke();
             }
             finally
             {

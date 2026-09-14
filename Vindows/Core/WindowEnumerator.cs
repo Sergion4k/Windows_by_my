@@ -17,7 +17,7 @@ public static class WindowEnumerator
             {
                 try
                 {
-                    if (h != shell && TryGetWindowInfo(h, out var info))
+                    if (h != shell && TryGetWindowInfoCore(h, out var info))
                         windows.Add(info);
                 }
                 catch (Exception ex)
@@ -35,7 +35,10 @@ public static class WindowEnumerator
         return windows;
     }
 
-    private static bool TryGetWindowInfo(IntPtr h, out WindowInfo info)
+    public static bool TryGetWindowInfo(IntPtr handle, out WindowInfo info) =>
+        TryGetWindowInfoCore(handle, out info);
+
+    private static bool TryGetWindowInfoCore(IntPtr h, out WindowInfo info)
     {
         info = null!;
 
@@ -54,7 +57,8 @@ public static class WindowEnumerator
         string process;
         try
         {
-            process = Process.GetProcessById((int)pid).ProcessName;
+            using var owner = Process.GetProcessById((int)pid);
+            process = owner.ProcessName;
         }
         catch
         {
@@ -66,7 +70,7 @@ public static class WindowEnumerator
         var title = sb.ToString();
         if (string.IsNullOrWhiteSpace(title)) return false;
 
-        info = new WindowInfo { Handle = h, Title = title, ProcessName = process };
+        info = new WindowInfo { Handle = h, Title = title, ProcessName = process, ProcessId = pid };
         return true;
     }
 }

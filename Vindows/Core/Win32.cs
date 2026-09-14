@@ -15,6 +15,13 @@ internal static class Win32
         public int Left, Top, Right, Bottom;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct MONITORINFOEX
     {
@@ -65,7 +72,7 @@ internal static class Win32
                     {
                         Handle = h,
                         DeviceName = mi.szDevice,
-                        DisplayName = $"Монитор {index + 1}: {b.Right - b.Left}×{b.Bottom - b.Top} @ ({b.Left},{b.Top})",
+                        DisplayName = MonitorDisplayName(mi.szDevice, b, (mi.dwFlags & 1) != 0, index + 1),
                         Bounds = new Rect(b.Left, b.Top, b.Right - b.Left, b.Bottom - b.Top),
                         WorkArea = new Rect(w.Left, w.Top, w.Right - w.Left, w.Bottom - w.Top),
                     });
@@ -82,6 +89,23 @@ internal static class Win32
 
         EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, Callback, IntPtr.Zero);
         return monitors;
+    }
+
+    internal static string MonitorDisplayName(string deviceName, RECT bounds, bool primary, int fallbackNumber)
+    {
+        var digits = new string(deviceName.Reverse().TakeWhile(char.IsDigit).Reverse().ToArray());
+        var number = int.TryParse(digits, out var parsed) ? parsed : fallbackNumber;
+        var position = new List<string>();
+        if (primary) position.Add("основной");
+        else
+        {
+            if (bounds.Right <= 0) position.Add("слева");
+            else if (bounds.Left > 0) position.Add("справа");
+            if (bounds.Top < 0) position.Add("выше");
+            else if (bounds.Top > 0) position.Add("ниже");
+            if (position.Count == 0) position.Add("дополнительный");
+        }
+        return $"Монитор {number} · {bounds.Right - bounds.Left}×{bounds.Bottom - bounds.Top} · {string.Join(", ", position)}";
     }
 
     /// <summary>Монитор, на котором находится окно (по Win32, с учётом ближайшего при пересечении границ).</summary>
@@ -103,6 +127,22 @@ internal static class Win32
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetShellWindow();
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(POINT point);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetCursorPos(out POINT point);
+
+    [DllImport("user32.dll")]
+    public static extern short GetAsyncKeyState(int virtualKey);
+
+    public const uint GA_ROOT = 2;
+    public const int VK_LBUTTON = 0x01;
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -133,6 +173,11 @@ internal static class Win32
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool IsWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int index);
+
+    public static bool IsTopmost(IntPtr hwnd) => (GetWindowLongPtr(hwnd, -20).ToInt64() & 0x00000008) != 0;
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool IsZoomed(IntPtr hWnd);
@@ -146,6 +191,9 @@ internal static class Win32
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
 
     // ---------- События окон (SetWinEventHook) ----------
 
@@ -168,6 +216,9 @@ internal static class Win32
     public const uint SWP_SHOWWINDOW = 0x0040;
     public const int SW_RESTORE = 9;
     public const int DWMWA_CLOAKED = 14;
+    /// <summary>Предпочтение скругления внешних углов окна Windows 11.</summary>
+    public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    public const int DWMWCP_ROUND = 2;
     /// <summary>Видимые границы окна — без невидимых рамок тени DWM.</summary>
     public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 }

@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Text.Json.Serialization;
 
 namespace Vindows.Core;
 
@@ -30,7 +31,34 @@ public sealed class Zone
 
     /// <summary>Имя процесса (exe), окно которого размещается в этой области. null — область пустая.</summary>
     public string? ProcessName { get; set; }
+    public WindowSelectionMode SelectionMode { get; set; }
+    public string? WindowTitle { get; set; }
+
+    // HWND и PID действительны только в текущем сеансе. В JSON остаётся название окна.
+    [JsonIgnore] public IntPtr WindowHandle { get; set; }
+    [JsonIgnore] public uint WindowProcessId { get; set; }
+    [JsonIgnore] public string Status { get; set; } = "Не назначено";
+
+    public void SelectWindow(WindowInfo window)
+    {
+        ProcessName = window.ProcessName;
+        WindowHandle = window.Handle;
+        WindowProcessId = window.ProcessId;
+        WindowTitle = window.Title;
+    }
+
+    public void CopyAssignmentFrom(Zone source)
+    {
+        ProcessName = source.ProcessName;
+        SelectionMode = source.SelectionMode;
+        WindowTitle = source.WindowTitle;
+        WindowHandle = source.WindowHandle;
+        WindowProcessId = source.WindowProcessId;
+    }
 }
+
+public enum WindowSelectionMode { AnyWindow, SpecificWindow }
+public enum MonitorMoveBehavior { ReturnToZone, ReleaseWindow }
 
 /// <summary>Раскладка одного монитора: сетка + список областей.</summary>
 public sealed class MonitorLayout
@@ -51,6 +79,7 @@ public sealed class WindowInfo
     public required IntPtr Handle { get; init; }
     public required string Title { get; init; }
     public required string ProcessName { get; init; }
+    public uint ProcessId { get; init; }
 
     public string DisplayName => $"{Title}  [{ProcessName}]";
 
@@ -64,6 +93,8 @@ public sealed class LayoutFile
 
     /// <summary>Контроль окон: возвращать ли привязанные окна в области, пока программа запущена.</summary>
     public bool ControlEnabled { get; set; } = true;
+    public bool KeepOnTop { get; set; }
+    public MonitorMoveBehavior MonitorMoveBehavior { get; set; }
 }
 
 /// <summary>Итог расстановки окон: сколько размещено и для каких областей окна не найдены.</summary>

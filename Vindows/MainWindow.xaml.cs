@@ -1,10 +1,22 @@
 ﻿using System.Collections.ObjectModel;
 using System.Windows;
+using System.Diagnostics;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Shapes;
+using System.Windows.Threading;
+using Forms = System.Windows.Forms;
+using Drawing = System.Drawing;
+using Brushes = System.Windows.Media.Brushes;
+using Color = System.Windows.Media.Color;
+using Cursors = System.Windows.Input.Cursors;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
+using Point = System.Windows.Point;
+using Rectangle = System.Windows.Shapes.Rectangle;
+using VerticalAlignment = System.Windows.VerticalAlignment;
 using Vindows.Core;
 
 namespace Vindows;
@@ -13,28 +25,122 @@ public partial class MainWindow : Window
 {
     private readonly List<MonitorInfo> _monitors = new();
     private readonly List<MonitorLayout> _layouts = new();
-    private readonly ObservableCollection<WindowInfo> _windows = new();
+    private List<WindowInfo> _windows = new();
     private readonly WindowWatcher _watcher = new();
     private readonly Dictionary<FrameworkElement, GripData> _grips = new();
+    private readonly Dictionary<Zone, ZoneVM> _zoneViewModels = new();
     private MonitorInfo? _currentMonitor;
     private MonitorLayout? _currentLayout;
     private GripData? _dragGrip;
     private Point _dragLast;
     private bool _initialized;
+    private bool _isExiting;
+    private readonly Forms.NotifyIcon _trayIcon;
+    private readonly DispatcherTimer _windowRefreshTimer;
+    private readonly DispatcherTimer _monitorRefreshTimer;
+    private readonly DispatcherTimer _externalDragTimer;
+    private bool _leftButtonWasDown;
+    private WindowInfo? _externalDragWindow;
 
     /// <summary>Разделитель сетки: вертикальный (между колонками) или горизонтальный (между строками).</summary>
     private sealed record GripData(bool IsVertical, int Index);
 
-    /// <summary>Список открытых окон для ComboBox в каждой зоне.</summary>
-    public ObservableCollection<WindowInfo> Windows => _windows;
-
     public MainWindow()
     {
         InitializeComponent();
+        _trayIcon = CreateTrayIcon();
+        _windowRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
+        _windowRefreshTimer.Tick += (_, _) => RefreshWindows();
+        _monitorRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
+        _monitorRefreshTimer.Tick += (_, _) => RefreshMonitors(false);
+        _externalDragTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(30) };
+        _externalDragTimer.Tick += ExternalDragTimer_Tick;
         Loaded += (_, _) => Initialize();
-        Closed += (_, _) => _watcher.Dispose();
+        SourceInitialized += (_, _) => ApplyRoundedWindowCorners();
+        StateChanged += MainWindow_StateChanged;
+        Closing += MainWindow_Closing;
+        Closed += MainWindow_Closed;
         // Когда пользователь выбирает наше окно — поднимаем его поверх расставленных окон.
-        Activated += (_, _) => { if (ControlCheck.IsChecked == true) RaiseToTopmost(); };
+        Activated += (_, _) => { if (TopmostCheck.IsChecked == true) RaiseToTopmost(); };
+        _watcher.StateChanged += RefreshZoneStatuses;
+    }
+
+    private void ApplyRoundedWindowCorners()
+    {
+        try
+        {
+            var hwnd = new WindowInteropHelper(this).Handle;
+            var preference = Win32.DWMWCP_ROUND;
+            Win32.DwmSetWindowAttribute(hwnd, Win32.DWMWA_WINDOW_CORNER_PREFERENCE,
+                ref preference, sizeof(int));
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Line("Rounded window corners: " + ex.Message);
+        }
+    }
+
+    private Forms.NotifyIcon CreateTrayIcon()
+    {
+        var menu = new Forms.ContextMenuStrip();
+        menu.Items.Add("Показать Vindows", null, (_, _) => ShowFromTray());
+        menu.Items.Add(new Forms.ToolStripSeparator());
+        menu.Items.Add("Выход", null, (_, _) => ExitFromTray());
+
+        var icon = Drawing.SystemIcons.Application;
+        if (!string.IsNullOrWhiteSpace(Environment.ProcessPath))
+        {
+            try { icon = Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath) ?? icon; }
+            catch (Exception ex) { DebugLog.Line("Tray icon: " + ex.Message); }
+        }
+
+        var trayIcon = new Forms.NotifyIcon
+        {
+            Icon = icon,
+            Text = "Vindows",
+            ContextMenuStrip = menu,
+            Visible = true,
+        };
+        trayIcon.DoubleClick += (_, _) => ShowFromTray();
+        return trayIcon;
+    }
+
+    private void MainWindow_StateChanged(object? sender, EventArgs e)
+    {
+        if (WindowState != WindowState.Minimized) return;
+        Hide();
+        _trayIcon.ShowBalloonTip(1500, "Vindows", "Приложение свернуто в трей", Forms.ToolTipIcon.Info);
+    }
+
+    private void ShowFromTray()
+    {
+        Show();
+        WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    private void ExitFromTray()
+    {
+        _isExiting = true;
+        Close();
+    }
+
+    private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (_isExiting) return;
+        e.Cancel = true;
+        Hide();
+        _trayIcon.ShowBalloonTip(1500, "Vindows", "Приложение свернуто в трей", Forms.ToolTipIcon.Info);
+    }
+
+    private void MainWindow_Closed(object? sender, EventArgs e)
+    {
+        _windowRefreshTimer.Stop();
+        _monitorRefreshTimer.Stop();
+        _externalDragTimer.Stop();
+        _trayIcon.Visible = false;
+        _trayIcon.Dispose();
+        _watcher.Dispose();
     }
 
     /// <summary>Поднимает окно Vindows наверх слоя «поверх всех», чтобы оно не пряталось
@@ -57,7 +163,7 @@ public partial class MainWindow : Window
     private ApplyResult ReapplyAll()
     {
         var result = _watcher.Reapply(_layouts, _monitors);
-        if (ControlCheck.IsChecked == true) RaiseToTopmost();
+        if (TopmostCheck.IsChecked == true) RaiseToTopmost();
         RebuildZoneList();
         RedrawPreview();
         return result;
@@ -71,6 +177,9 @@ public partial class MainWindow : Window
         try
         {
             InitializeCore();
+            _windowRefreshTimer.Start();
+            _monitorRefreshTimer.Start();
+            _externalDragTimer.Start();
         }
         catch (Exception ex)
         {
@@ -101,11 +210,15 @@ public partial class MainWindow : Window
         // Галочка управляет контролем окон; подписываемся после установки значения,
         // чтобы не сработать во время инициализации.
         ControlCheck.IsChecked = file.ControlEnabled;
-        Topmost = file.ControlEnabled;
+        TopmostCheck.IsChecked = file.KeepOnTop;
+        Topmost = file.KeepOnTop;
         ControlCheck.Checked += ControlCheck_Changed;
         ControlCheck.Unchecked += ControlCheck_Changed;
+        TopmostCheck.Checked += TopmostCheck_Changed;
+        TopmostCheck.Unchecked += TopmostCheck_Changed;
 
         _watcher.Enabled = file.ControlEnabled;
+        _watcher.MonitorMoveBehavior = MonitorMoveBehavior.ReturnToZone;
         var hookOk = _watcher.Start();
 
         _watcher.UpdateTargets(_layouts, _monitors);
@@ -133,7 +246,13 @@ public partial class MainWindow : Window
 
     private void SetupCurrentMonitorUI()
     {
-        if (_currentMonitor == null) return;
+        if (_currentMonitor == null)
+        {
+            _currentLayout = null;
+            _zoneViewModels.Clear();
+            RedrawPreview();
+            return;
+        }
         _currentLayout = GetLayoutFor(_currentMonitor);
 
         ColsBox.Text = _currentLayout.Columns.ToString();
@@ -146,31 +265,50 @@ public partial class MainWindow : Window
 
     private void RebuildZoneList()
     {
+        _zoneViewModels.Clear();
         if (_currentLayout == null) return;
-        ZonesList.ItemsSource = _currentLayout.Zones.Select(z => new ZoneVM(z)).ToList();
+        foreach (var (zone, index) in _currentLayout.Zones.Select((zone, index) => (zone, index)))
+        {
+            var zoneVm = new ZoneVM(zone, ZonePosition(index, _currentLayout.Columns, _currentLayout.Rows), _windows, () =>
+            {
+                _watcher.ForgetZone(zone);
+                RedrawPreview();
+            });
+            _zoneViewModels[zone] = zoneVm;
+        }
+    }
+
+    internal static string ZonePosition(int index, int columns, int rows)
+    {
+        if (columns == 1 && rows == 1) return "весь экран";
+        if (rows == 1 && columns == 2) return index == 0 ? "слева" : "справа";
+        if (columns == 1 && rows == 2) return index == 0 ? "сверху" : "снизу";
+        return $"строка {index / Math.Max(1, columns) + 1}, колонка {index % Math.Max(1, columns) + 1}";
+    }
+
+    private void RefreshZoneStatuses()
+    {
+        foreach (var zone in _zoneViewModels.Values)
+            zone.RefreshStatus();
     }
 
     private void RefreshWindows()
     {
-        // Снимок назначений: очистка списка сбрасывает выбор в ComboBox, и TwoWay-привязка
-        // записывает null в зоны. Восстанавливаем назначения после перезаполнения списка.
-        var saved = _layouts.ToDictionary(l => l, l => l.Zones.Select(z => z.ProcessName).ToList());
-
-        _windows.Clear();
-        _windows.Add(new WindowInfo { Handle = IntPtr.Zero, Title = "— не выбрано —", ProcessName = "" });
-        foreach (var w in WindowEnumerator.GetOpenWindows())
-            _windows.Add(w);
-
-        var names = _windows.Select(w => w.ProcessName).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var layout in _layouts)
+        // Новый снимок не изменяет назначения отсутствующих окон и приложений.
+        var ownProcess = Process.GetCurrentProcess().ProcessName;
+        _windows = WindowEnumerator.GetOpenWindows()
+            .Where(w => !string.Equals(w.ProcessName, ownProcess, StringComparison.OrdinalIgnoreCase)).ToList();
+        foreach (var zone in _layouts.SelectMany(l => l.Zones))
         {
-            var before = saved[layout];
-            for (int i = 0; i < layout.Zones.Count; i++)
+            if (string.IsNullOrWhiteSpace(zone.ProcessName)) continue;
+            if (zone.SelectionMode == WindowSelectionMode.SpecificWindow)
             {
-                var desired = i < before.Count ? before[i] : null;
-                layout.Zones[i].ProcessName =
-                    !string.IsNullOrEmpty(desired) && names.Contains(desired) ? desired : null;
+                var window = LayoutApplier.ResolveSpecificWindow(zone, _windows, out var reason);
+                if (window == null) zone.Status = reason;
+                else zone.SelectWindow(window);
             }
+            else if (!_windows.Any(w => string.Equals(w.ProcessName, zone.ProcessName, StringComparison.OrdinalIgnoreCase)))
+                zone.Status = "Нет открытых окон приложения";
         }
         RebuildZoneList();
     }
@@ -213,14 +351,26 @@ public partial class MainWindow : Window
                 StrokeThickness = 1.5,
                 Fill = new SolidColorBrush(Color.FromArgb(40, 0x2B, 0x7C, 0xD3)),
             };
-            Canvas.SetLeft(rect, ox + r.X * scale);
-            Canvas.SetTop(rect, oy + r.Y * scale);
+            Canvas.SetLeft(rect, ox + (r.X - wa.X) * scale);
+            Canvas.SetTop(rect, oy + (r.Y - wa.Y) * scale);
             PreviewCanvas.Children.Add(rect);
 
             var label = new TextBlock { Text = i.ToString(), Foreground = Brushes.LightGray, FontSize = 11 };
-            Canvas.SetLeft(label, ox + r.X * scale + 4);
-            Canvas.SetTop(label, oy + r.Y * scale + 2);
+            Canvas.SetLeft(label, ox + (r.X - wa.X) * scale + 4);
+            Canvas.SetTop(label, oy + (r.Y - wa.Y) * scale + 2);
             PreviewCanvas.Children.Add(label);
+
+            var dropHint = new TextBlock
+            {
+                Text = "+",
+                Foreground = new SolidColorBrush(Color.FromArgb(150, 0x55, 0xB5, 0xFF)),
+                FontSize = 30,
+                FontWeight = FontWeights.Light,
+                IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(dropHint, ox + (r.X - wa.X) * scale + r.Width * scale / 2 - 9);
+            Canvas.SetTop(dropHint, oy + (r.Y - wa.Y) * scale + r.Height * scale / 2 - 19);
+            PreviewCanvas.Children.Add(dropHint);
         }
 
         DrawSplitterGrips(scale, ox, oy);
@@ -363,7 +513,7 @@ public partial class MainWindow : Window
 
         // Переносим назначенные приложения по индексу зоны.
         for (int i = 0; i < Math.Min(newZones.Count, _currentLayout.Zones.Count); i++)
-            newZones[i].ProcessName = _currentLayout.Zones[i].ProcessName;
+            newZones[i].CopyAssignmentFrom(_currentLayout.Zones[i]);
 
         _currentLayout.Columns = cols;
         _currentLayout.Rows = rows;
@@ -380,10 +530,15 @@ public partial class MainWindow : Window
     private void RefreshBtn_Click(object sender, RoutedEventArgs e)
     {
         RefreshWindows();
-        StatusText.Text = $"Открытых окон: {_windows.Count - 1}";
+        StatusText.Text = $"Открытых окон: {_windows.Count}. Назначения сохранены.";
     }
 
     private void RefreshMonitorsBtn_Click(object sender, RoutedEventArgs e)
+    {
+        RefreshMonitors(true);
+    }
+
+    private void RefreshMonitors(bool showStatus)
     {
         var selectedDevice = _currentMonitor?.DeviceName;
         _monitors.Clear();
@@ -400,12 +555,14 @@ public partial class MainWindow : Window
         if (ControlCheck.IsChecked == true)
         {
             var result = ReapplyAll();
-            StatusText.Text = $"Мониторов: {_monitors.Count}. Перечитано из системы. Размещено окон: {result.Placed}." + ApplyNotes(result);
+            if (showStatus)
+                StatusText.Text = $"Мониторов: {_monitors.Count}. Перечитано из системы. Размещено окон: {result.Placed}." + ApplyNotes(result);
         }
         else
         {
             _watcher.UpdateTargets(_layouts, _monitors);
-            StatusText.Text = $"Мониторов: {_monitors.Count}. Список обновлён из системы.";
+            if (showStatus)
+                StatusText.Text = $"Мониторов: {_monitors.Count}. Список обновлён из системы.";
         }
     }
 
@@ -424,27 +581,9 @@ public partial class MainWindow : Window
         StatusText.Text = text;
     }
 
-    private void SaveBtn_Click(object sender, RoutedEventArgs e)
-    {
-        StatusText.Text = SaveLayouts()
-            ? $"Раскладка сохранена: {LayoutStore.FilePath}"
-            : "Не удалось сохранить раскладку (нет доступа к папке %APPDATA%\\Vindows).";
-    }
-
-    /// <summary>Сохраняет раскладку вместе с состоянием контроля окон. Возвращает успех записи.</summary>
-    private bool SaveLayouts() =>
-        LayoutStore.Save(new LayoutFile
-        {
-            Monitors = _layouts,
-            ControlEnabled = ControlCheck.IsChecked == true,
-        });
-
     private void ControlCheck_Changed(object sender, RoutedEventArgs e)
     {
         _watcher.Enabled = ControlCheck.IsChecked == true;
-        // Пока расставленные окна «поверх всех», держим и своё окно в этом слое,
-        // иначе его не будет видно из-за привязанных окон.
-        Topmost = ControlCheck.IsChecked == true;
 
         if (ControlCheck.IsChecked == true)
         {
@@ -454,39 +593,171 @@ public partial class MainWindow : Window
         }
         else
         {
-            _watcher.ReleaseWindows();
-            StatusText.Text = "Контроль выключен — окна можно свободно перемещать.";
+            _watcher.RefreshControlStatus();
+            StatusText.Text = "Возврат в зоны выключен — окна можно свободно перемещать.";
         }
     }
 
-    private void LoadBtn_Click(object sender, RoutedEventArgs e)
+    private void TopmostCheck_Changed(object sender, RoutedEventArgs e)
     {
-        var file = LayoutStore.Load();
-        _layouts.Clear();
-        _layouts.AddRange(file.Monitors);
-        foreach (var m in _monitors)
-            GetLayoutFor(m);
-
-        SetupCurrentMonitorUI();
-        RefreshWindows();
-
-        ControlCheck.IsChecked = file.ControlEnabled;
-        Topmost = file.ControlEnabled;
-        _watcher.Enabled = file.ControlEnabled;
-        if (file.ControlEnabled)
-        {
-            var result = ReapplyAll();
-            StatusText.Text = $"Раскладка загружена. Размещено окон: {result.Placed}." + ApplyNotes(result);
-        }
-        else
-        {
-            _watcher.ReleaseWindows();
-            _watcher.UpdateTargets(_layouts, _monitors);
-            StatusText.Text = "Раскладка загружена (контроль окон выключен)";
-        }
+        Topmost = TopmostCheck.IsChecked == true;
+        _watcher.SetKeepOnTop(Topmost);
+        if (Topmost) RaiseToTopmost();
+        StatusText.Text = Topmost ? "Режим «Поверх всех» включён для назначенных окон."
+            : "Режим «Поверх всех» выключен. Возврат в зоны настраивается отдельно.";
     }
 
-    private void PreviewCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => RedrawPreview();
+    private void PreviewCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        PreviewCanvas.Clip = new RectangleGeometry(
+            new Rect(0, 0, PreviewCanvas.ActualWidth, PreviewCanvas.ActualHeight), 12, 12);
+        RedrawPreview();
+    }
+
+    private void PreviewCanvas_DragOver(object sender, System.Windows.DragEventArgs e)
+    {
+        e.Effects = e.Data.GetDataPresent(typeof(WindowInfo))
+            ? System.Windows.DragDropEffects.Move : System.Windows.DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private void PreviewCanvas_Drop(object sender, System.Windows.DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(typeof(WindowInfo)) || _currentLayout == null || _currentMonitor == null)
+            return;
+
+        var window = e.Data.GetData(typeof(WindowInfo)) as WindowInfo;
+        if (window == null) return;
+
+        var position = e.GetPosition(PreviewCanvas);
+        var (scale, ox, oy) = PreviewTransform();
+        if (scale <= 0) return;
+
+        var wa = _currentMonitor.WorkArea;
+        var x = (position.X - ox) / (wa.Width * scale) * 100.0;
+        var y = (position.Y - oy) / (wa.Height * scale) * 100.0;
+        var zone = _currentLayout.Zones.FirstOrDefault(z =>
+            x >= z.X && x <= z.X + z.Width && y >= z.Y && y <= z.Y + z.Height);
+        if (zone == null) return;
+
+        var zoneVm = FindZoneViewModel(zone);
+        if (zoneVm != null)
+        {
+            zoneVm.AssignWindow(window);
+            var result = ReapplyAll();
+            PlayDropRipple(zone);
+            StatusText.Text = $"Окно «{window.Title}» назначено в {zone.Name} и размещено." + ApplyNotes(result);
+        }
+        e.Handled = true;
+    }
+
+    private void ExternalDragTimer_Tick(object? sender, EventArgs e)
+    {
+        bool leftButtonDown = (Win32.GetAsyncKeyState(Win32.VK_LBUTTON) & 0x8000) != 0;
+        if (leftButtonDown && !_leftButtonWasDown)
+        {
+            var ownHandle = new WindowInteropHelper(this).Handle;
+            if (Win32.GetCursorPos(out var cursor))
+            {
+                var source = Win32.GetAncestor(Win32.WindowFromPoint(cursor), Win32.GA_ROOT);
+                if (source != IntPtr.Zero && source != ownHandle &&
+                    WindowEnumerator.TryGetWindowInfo(source, out var window))
+                {
+                    _externalDragWindow = window;
+                    StatusText.Text = $"Перетащите «{window.Title}» в нужную область предпросмотра.";
+                }
+            }
+        }
+
+        if (!leftButtonDown && _leftButtonWasDown && _externalDragWindow != null)
+        {
+            if (Win32.GetCursorPos(out var cursor))
+            {
+                var screenPoint = new Point(cursor.X, cursor.Y);
+                var previewPoint = PreviewCanvas.PointFromScreen(screenPoint);
+                if (previewPoint.X >= 0 && previewPoint.Y >= 0 &&
+                    previewPoint.X <= PreviewCanvas.ActualWidth && previewPoint.Y <= PreviewCanvas.ActualHeight)
+                    AssignExternalWindowToPreview(_externalDragWindow, previewPoint);
+            }
+            _externalDragWindow = null;
+        }
+
+        _leftButtonWasDown = leftButtonDown;
+    }
+
+    private void AssignExternalWindowToPreview(WindowInfo window, Point position)
+    {
+        if (_currentLayout == null || _currentMonitor == null) return;
+        var (scale, ox, oy) = PreviewTransform();
+        var wa = _currentMonitor.WorkArea;
+        if (scale <= 0 || wa.Width <= 0 || wa.Height <= 0) return;
+
+        var x = (position.X - ox) / (wa.Width * scale) * 100.0;
+        var y = (position.Y - oy) / (wa.Height * scale) * 100.0;
+        var zone = _currentLayout.Zones.FirstOrDefault(z =>
+            x >= z.X && x <= z.X + z.Width && y >= z.Y && y <= z.Y + z.Height);
+        var zoneVm = zone == null ? null : FindZoneViewModel(zone);
+        if (zone == null || zoneVm == null) return;
+
+        zoneVm.AssignWindow(window);
+        var result = ReapplyAll();
+        PlayDropRipple(zone);
+        StatusText.Text = $"Окно «{window.Title}» назначено в {zone.Name} и размещено." + ApplyNotes(result);
+    }
+
+    private void PlayDropRipple(Zone zone)
+    {
+        if (_currentMonitor == null) return;
+        var (scale, ox, oy) = PreviewTransform();
+        var r = LayoutApplier.ZoneToPixelRect(zone, _currentMonitor.WorkArea);
+        double centerX = ox + (r.X - _currentMonitor.WorkArea.X + r.Width / 2) * scale;
+        double centerY = oy + (r.Y - _currentMonitor.WorkArea.Y + r.Height / 2) * scale;
+
+        var ripple = new Ellipse
+        {
+            Width = 22,
+            Height = 22,
+            Stroke = new SolidColorBrush(Color.FromArgb(220, 0x78, 0xC7, 0xFF)),
+            StrokeThickness = 2,
+            Fill = Brushes.Transparent,
+            IsHitTestVisible = false,
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            RenderTransform = new ScaleTransform(0.25, 0.25),
+        };
+        var drop = new Ellipse
+        {
+            Width = 9,
+            Height = 9,
+            Fill = new SolidColorBrush(Color.FromArgb(220, 0x78, 0xC7, 0xFF)),
+            IsHitTestVisible = false,
+            RenderTransformOrigin = new Point(0.5, 0.5),
+        };
+        Canvas.SetLeft(ripple, centerX - ripple.Width / 2);
+        Canvas.SetTop(ripple, centerY - ripple.Height / 2);
+        Canvas.SetLeft(drop, centerX - drop.Width / 2);
+        Canvas.SetTop(drop, centerY - drop.Height / 2);
+        PreviewCanvas.Children.Add(ripple);
+        PreviewCanvas.Children.Add(drop);
+
+        var duration = new Duration(TimeSpan.FromMilliseconds(720));
+        var ease = new QuadraticEase { EasingMode = EasingMode.EaseOut };
+        var scaleX = new DoubleAnimation(0.25, 5.5, duration) { EasingFunction = ease };
+        var scaleY = new DoubleAnimation(0.25, 5.5, duration) { EasingFunction = ease };
+        var opacity = new DoubleAnimation(0.85, 0, duration) { EasingFunction = ease };
+        var transform = (ScaleTransform)ripple.RenderTransform;
+        transform.BeginAnimation(ScaleTransform.ScaleXProperty, scaleX);
+        transform.BeginAnimation(ScaleTransform.ScaleYProperty, scaleY);
+        ripple.BeginAnimation(OpacityProperty, opacity);
+        drop.BeginAnimation(OpacityProperty, new DoubleAnimation(0.9, 0, duration));
+        opacity.Completed += (_, _) =>
+        {
+            PreviewCanvas.Children.Remove(ripple);
+            PreviewCanvas.Children.Remove(drop);
+        };
+    }
+
+    private ZoneVM? FindZoneViewModel(Zone zone)
+        => _zoneViewModels.TryGetValue(zone, out var zoneVm) ? zoneVm : null;
 
     private void PreviewCanvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -502,7 +773,7 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
-    private void PreviewCanvas_MouseMove(object sender, MouseEventArgs e)
+    private void PreviewCanvas_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
     {
         if (_dragGrip == null || _currentLayout == null || _currentMonitor == null) return;
 

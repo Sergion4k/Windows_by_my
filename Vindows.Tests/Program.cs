@@ -88,6 +88,104 @@ Check(Math.Abs(left.Left + 2560) < 0.001 && Math.Abs(left.Top + 300) < 0.001 &&
     Math.Abs(right.Bottom - secondary.WorkArea.Bottom) < 0.001,
     "Secondary monitor geometry preserves negative origins, work area and pixel gaps");
 
+// Конкретные окна имеют приоритет над назначениями всего приложения.
+monitors.Add(secondary);
+layouts = [first, second];
+windows = [Window(1), Window(2), Window(3)];
+hosts[new(1)] = primary.DeviceName;
+hosts[new(2)] = primary.DeviceName;
+hosts[new(3)] = secondary.DeviceName;
+second.Zones[0].SelectionMode = WindowSelectionMode.SpecificWindow;
+second.Zones[0].SelectWindow(windows[0]);
+var specific = Match(out missing);
+Check(specific.Count == 2 && missing.Count == 0 &&
+    specific.Single(t => t.Layout == second).Handle == new IntPtr(1) &&
+    specific.Single(t => t.Layout == first).Handle == new IntPtr(2),
+    "Specific window is reserved before app matching, even on another monitor");
+
+windows[0] = new WindowInfo { Handle = new(1), Title = "Changed title", ProcessName = "editor" };
+specific = Match(out missing, specific);
+Check(specific.Single(t => t.Layout == second).Handle == new IntPtr(1) &&
+    second.Zones[0].WindowTitle == "Changed title", "Changing the title does not replace the selected window");
+
+windows.RemoveAt(0);
+specific = Match(out missing, specific);
+Check(specific.Count == 1 && missing.Count == 1 && second.Zones[0].Status.Contains("закрыто"),
+    "Closed specific window is not replaced by another window of the same app");
+
+windows.Insert(0, new WindowInfo { Handle = new(1), ProcessId = 99, Title = "Changed title", ProcessName = "editor" });
+Check(LayoutApplier.ResolveSpecificWindow(second.Zones[0], windows, out _) == null,
+    "A reused handle owned by another process does not match");
+
+var saved = new LayoutFile { Monitors = layouts, KeepOnTop = true, ControlEnabled = false,
+    MonitorMoveBehavior = MonitorMoveBehavior.ReleaseWindow };
+var json = System.Text.Json.JsonSerializer.Serialize(saved);
+var restored = System.Text.Json.JsonSerializer.Deserialize<LayoutFile>(json)!;
+var restoredZone = restored.Monitors[1].Zones[0];
+Check(restored.KeepOnTop && !restored.ControlEnabled &&
+    restored.MonitorMoveBehavior == MonitorMoveBehavior.ReleaseWindow &&
+    restoredZone.WindowHandle == IntPtr.Zero && !json.Contains("WindowProcessId") && !json.Contains("Status"),
+    "Saved layouts preserve independent options without session handles or statuses");
+Check(LayoutApplier.ResolveSpecificWindow(restoredZone, windows, out _)?.Handle == new IntPtr(1),
+    "Saved specific selection resolves a unique title");
+windows.Add(new WindowInfo { Handle = new(4), Title = "Changed title", ProcessName = "editor" });
+Check(LayoutApplier.ResolveSpecificWindow(restoredZone, windows, out var reason) == null && reason.Contains("Несколько"),
+    "Ambiguous saved titles require a new selection");
+
+first.Zones[0].SelectionMode = WindowSelectionMode.SpecificWindow;
+first.Zones[0].SelectWindow(windows[0]);
+second.Zones[0].SelectWindow(windows[0]);
+specific = Match(out missing);
+Check(specific.Count == 1 && missing.Count == 1 && second.Zones[0].Status.Contains("другой зоне"),
+    "The same specific window cannot occupy two zones");
+
+var legacy = System.Text.Json.JsonSerializer.Deserialize<LayoutFile>("{\"Monitors\":[{\"DeviceName\":\"primary\",\"Zones\":[{\"Name\":\"Zone 1\",\"ProcessName\":\"editor\"}]}],\"ControlEnabled\":true}")!;
+Check(legacy.Monitors[0].Zones[0].SelectionMode == WindowSelectionMode.AnyWindow && !legacy.KeepOnTop,
+    "Old layouts load as app assignments with topmost disabled");
+
+Check(WindowWatcher.ShouldReleaseAfterMove(MonitorMoveBehavior.ReleaseWindow, false) &&
+    !WindowWatcher.ShouldReleaseAfterMove(MonitorMoveBehavior.ReleaseWindow, true) &&
+    !WindowWatcher.ShouldReleaseAfterMove(MonitorMoveBehavior.ReturnToZone, false),
+    "Cross-monitor behavior releases only when explicitly selected");
+
+first.Zones[0].SelectionMode = WindowSelectionMode.AnyWindow;
+second.Zones[0].SelectionMode = WindowSelectionMode.AnyWindow;
+windows = [Window(1), Window(3)];
+var beforeDrag = Match(out missing);
+hosts[new(1)] = secondary.DeviceName;
+hosts[new(3)] = primary.DeviceName;
+var returned = LayoutApplier.BuildTargets(layouts, monitors, windows,
+    (hwnd, monitor) => hosts[hwnd] == monitor.DeviceName, (_, _) => 0, out missing, beforeDrag, true);
+Check(returned.Single(t => t.Layout == first).Handle == new IntPtr(1) &&
+    returned.Single(t => t.Layout == second).Handle == new IntPtr(3),
+    "Return-to-zone policy keeps original assignments after crossing monitors");
+
+var edited = new Zone { Name = "Zone", ProcessName = "missing" };
+int changes = 0;
+var vm = new Vindows.ZoneVM(edited, "слева", windows, () => changes++);
+Check(edited.ProcessName == "missing" && vm.SelectedOption!.Label.Contains("нет открытых"),
+    "Refreshing options retains assignments for absent apps");
+vm.SelectedOption = null;
+Check(edited.ProcessName == "missing" && changes == 0, "Transient UI selection resets do not erase assignments");
+vm.ModeIndex = 1;
+Check(edited.ProcessName == null && edited.WindowHandle == IntPtr.Zero,
+    "Switching to specific mode requires an explicit window selection");
+vm.SelectedOption = vm.Options.Single(o => o.Window?.Handle == new IntPtr(3));
+Check(edited.WindowHandle == new IntPtr(3) && edited.SelectionMode == WindowSelectionMode.SpecificWindow,
+    "Specific selection stores the chosen handle");
+vm.SelectedOption = vm.Options[0];
+Check(edited.ProcessName == null && edited.WindowHandle == IntPtr.Zero,
+    "Explicit unassignment clears the selected window");
+
+var copy = new Zone { Name = "New zone" };
+copy.CopyAssignmentFrom(second.Zones[0]);
+Check(copy.ProcessName == second.Zones[0].ProcessName && copy.WindowHandle == second.Zones[0].WindowHandle,
+    "Rebuilding the grid retains complete assignments");
+Check(Vindows.MainWindow.ZonePosition(1, 2, 1) == "справа" && Vindows.MainWindow.ZonePosition(1, 1, 2) == "снизу",
+    "Zone names describe their positions");
+Check(Win32.MonitorDisplayName("DISPLAY2", new Win32.RECT { Left = -2560, Top = -300, Right = 0, Bottom = 1100 }, false, 1)
+    == "Монитор 2 · 2560×1400 · слева, выше", "Monitor labels use device numbers and relative positions");
+
 Console.WriteLine($"{passed} checks passed.");
 
 static MonitorInfo Monitor(string name, Rect area) => new()

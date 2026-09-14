@@ -16,10 +16,10 @@ public static class LayoutApplier
     /// placed — фактические прямоугольники окон после расстановки (могут отличаться от зоны,
     /// если окно нельзя сжать до её размера).
     /// </summary>
-    public static ApplyResult Apply(List<MonitorLayout> layouts, List<MonitorInfo> monitors, out List<WindowTarget> placed, List<WindowTarget>? current = null)
+    public static ApplyResult Apply(List<MonitorLayout> layouts, List<MonitorInfo> monitors, out List<WindowTarget> placed, List<WindowTarget>? current = null, bool keepExistingAcrossMonitors = false)
     {
         DebugLog.Line("=== Apply: расстановка ===");
-        var targets = BuildTargets(layouts, monitors, out var missing, current);
+        var targets = BuildTargets(layouts, monitors, out var missing, current, keepExistingAcrossMonitors);
         bool adjusted = false;
 
         // Несколько проходов: расширение одной зоны может сделать соседнюю слишком узкой,
@@ -33,7 +33,7 @@ public static class LayoutApplier
                 {
                     // Окно могло быть закрыто между перечислением и расстановкой.
                     if (!Win32.IsWindow(t.Handle)) continue;
-                    if (!MoveTo(t.Handle, t.Rect, topmost: true)) continue;
+                    if (!MoveTo(t.Handle, t.Rect)) continue;
                     if (!TryGetVisibleRect(t.Handle, out var vis)) continue;
                     double overflowW = vis.Width - t.Rect.Width;
                     double overflowH = vis.Height - t.Rect.Height;
@@ -63,21 +63,33 @@ public static class LayoutApplier
             try
             {
                 // Окно могло быть закрыто между перечислением и расстановкой.
-                if (!Win32.IsWindow(t.Handle)) continue;
-                if (!MoveTo(t.Handle, t.Rect, topmost: true))
+                if (!Win32.IsWindow(t.Handle))
+                {
+                    t.Zone.Status = "Окно закрыто";
+                    missing.Add(t.Zone.Name);
+                    continue;
+                }
+                if (!MoveTo(t.Handle, t.Rect))
                 {
                     // Окно живо, но не двигается — почти наверняка нет прав (UIPI).
                     denied.Add(t.Zone.Name);
+                    t.Zone.Status = "Не удалось переместить окно — проверьте права доступа";
                     continue;
                 }
                 FitToWorkArea(t.Handle, t.WorkArea);
+                t.Zone.Status = "Окно размещено";
 
                 // Цель контроля — видимая область зоны (t.Rect), а не внешний прямоугольник окна:
                 // MoveTo выравнивает по DWM-рамке, и передача outer rect в watcher давала сдвиг.
                 if (TryGetVisibleRect(t.Handle, out var vis2))
                 {
                     if (Math.Abs(vis2.Width - t.Rect.Width) > 2 || Math.Abs(vis2.Height - t.Rect.Height) > 2)
+                    {
                         oversized.Add(t.Zone.Name);
+                        t.Zone.Status = "Размер окна не совпадает с зоной — возможно, достигнут минимальный размер";
+                    }
+                    else if (!IsAtTargetPosition(t.Handle, t.Rect))
+                        t.Zone.Status = "Окно смещено относительно зоны";
                     DebugLog.Line($"  PLACE {t.Zone.Name}: зона=({t.Rect.X:F0},{t.Rect.Y:F0},{t.Rect.Width:F0}x{t.Rect.Height:F0}) видимая=({vis2.X:F0},{vis2.Y:F0},{vis2.Width:F0}x{vis2.Height:F0})");
                 }
                 else
@@ -88,6 +100,7 @@ public static class LayoutApplier
             catch (Exception ex)
             {
                 DebugLog.Line($"  FAIL {t.Zone.Name}: {ex.Message}");
+                t.Zone.Status = "Ошибка размещения окна";
             }
         }
 
@@ -132,7 +145,7 @@ public static class LayoutApplier
     /// <summary>Сопоставляет назначенные приложения с открытыми окнами: пары «окно → область в пикселях».
     /// Если приложение назначено зонам на разных мониторах, окно закрепляется за зоной того монитора,
     /// на котором оно сейчас находится, а не за первой по порядку зоной на другом экране.</summary>
-    public static List<WindowTarget> BuildTargets(List<MonitorLayout> layouts, List<MonitorInfo> monitors, out List<string> missing, List<WindowTarget>? current = null)
+    public static List<WindowTarget> BuildTargets(List<MonitorLayout> layouts, List<MonitorInfo> monitors, out List<string> missing, List<WindowTarget>? current = null, bool keepExistingAcrossMonitors = false)
     {
         var ownProcess = Process.GetCurrentProcess().ProcessName;
         var windows = WindowEnumerator.GetOpenWindows()
@@ -141,14 +154,14 @@ public static class LayoutApplier
 
         return BuildTargets(layouts, monitors, windows,
             (hwnd, monitor) => IsOnMonitor(hwnd, monitor, monitors),
-            DistanceToMonitorCenter, out missing, current);
+            DistanceToMonitorCenter, out missing, current, keepExistingAcrossMonitors);
     }
 
     // Отдельное сопоставление позволяет проверить несколько мониторов без перемещения окон пользователя.
     internal static List<WindowTarget> BuildTargets(
         List<MonitorLayout> layouts, List<MonitorInfo> monitors, IReadOnlyList<WindowInfo> openWindows,
         Func<IntPtr, MonitorInfo, bool> isOnMonitor, Func<IntPtr, MonitorInfo, double> distanceToMonitor,
-        out List<string> missing, List<WindowTarget>? current = null)
+        out List<string> missing, List<WindowTarget>? current = null, bool keepExistingAcrossMonitors = false)
     {
         var windows = openWindows.ToList();
 
@@ -163,10 +176,13 @@ public static class LayoutApplier
         var active = new List<(MonitorLayout Layout, MonitorInfo Monitor)>();
         foreach (var layout in layouts)
         {
+            foreach (var zone in layout.Zones)
+                zone.Status = string.IsNullOrWhiteSpace(zone.ProcessName) ? "Не назначено" : "Ожидает расстановки";
             var monitor = monitors.FirstOrDefault(m => m.DeviceName == layout.DeviceName);
             if (monitor == null)
             {
                 DebugLog.Line($"  SKIP раскладка {layout.DeviceName}: такого монитора нет в системе");
+                foreach (var zone in layout.Zones) zone.Status = "Монитор отключён";
                 continue;
             }
 
@@ -178,6 +194,24 @@ public static class LayoutApplier
             active.Add((layout, monitor));
         }
 
+        // Конкретные окна резервируются раньше общих назначений приложений.
+        foreach (var (layout, monitor) in active)
+        {
+            foreach (var zone in layout.Zones.Where(z => z.SelectionMode == WindowSelectionMode.SpecificWindow &&
+                         !string.IsNullOrWhiteSpace(z.ProcessName)))
+            {
+                var win = ResolveSpecificWindow(zone, openWindows, out var reason);
+                if (win == null || !windows.Remove(win))
+                {
+                    zone.Status = win == null ? reason : "Это окно уже назначено другой зоне";
+                    missing.Add($"{zone.Name} ({zone.ProcessName})");
+                    continue;
+                }
+                zone.SelectWindow(win);
+                BindTarget(targets, win, zone, layout, monitor);
+            }
+        }
+
         // Проход 0: закреплённое окно сохраняет свою область, пока открыто, приложение не изменено
         // и окно остаётся на мониторе своей зоны.
         if (current != null)
@@ -186,13 +220,13 @@ public static class LayoutApplier
             {
                 foreach (var zone in layout.Zones)
                 {
-                    if (string.IsNullOrWhiteSpace(zone.ProcessName)) continue;
+                    if (zone.SelectionMode == WindowSelectionMode.SpecificWindow || string.IsNullOrWhiteSpace(zone.ProcessName)) continue;
                     var existing = current.FirstOrDefault(t => t.Layout == layout && t.Zone == zone);
                     if (existing.Handle == IntPtr.Zero) continue;
                     var candidate = windows.FirstOrDefault(w => w.Handle == existing.Handle);
                     if (candidate == null ||
                         !string.Equals(candidate.ProcessName, zone.ProcessName, StringComparison.OrdinalIgnoreCase) ||
-                        !isOnMonitor(candidate.Handle, monitor))
+                        (!keepExistingAcrossMonitors && !isOnMonitor(candidate.Handle, monitor)))
                         continue; // окно ушло на другой монитор — отпускаем, его подберёт зона нового экрана
                     windows.Remove(candidate);
                     BindTarget(targets, candidate, zone, layout, monitor);
@@ -210,6 +244,7 @@ public static class LayoutApplier
                 // Проход 0 уже закрепил окно: зона не должна забирать второе окно
                 // или попадать в список отсутствующих приложений.
                 if (targets.Any(t => t.Layout == layout && t.Zone == zone)) continue;
+                if (zone.SelectionMode == WindowSelectionMode.SpecificWindow) continue;
                 if (string.IsNullOrWhiteSpace(zone.ProcessName))
                 {
                     DebugLog.Line($"  SKIP {layout.DeviceName}/{zone.Name}: приложение не назначено");
@@ -239,12 +274,30 @@ public static class LayoutApplier
             {
                 DebugLog.Line($"  MISS {layout.DeviceName}/{zone.Name}: окно {zone.ProcessName} не найдено");
                 missing.Add($"{zone.Name} ({zone.ProcessName})");
+                zone.Status = openWindows.Any(w => string.Equals(w.ProcessName, zone.ProcessName, StringComparison.OrdinalIgnoreCase))
+                    ? "Нет свободного окна приложения" : "Нет открытых окон приложения";
                 continue;
             }
             windows.Remove(win);
             BindTarget(targets, win, zone, layout, monitor);
         }
         return targets;
+    }
+
+    internal static WindowInfo? ResolveSpecificWindow(Zone zone, IReadOnlyList<WindowInfo> windows, out string reason)
+    {
+        var candidates = windows.Where(w => string.Equals(w.ProcessName, zone.ProcessName, StringComparison.OrdinalIgnoreCase));
+        if (zone.WindowHandle != IntPtr.Zero)
+        {
+            var exact = candidates.FirstOrDefault(w => w.Handle == zone.WindowHandle && w.ProcessId == zone.WindowProcessId);
+            reason = "Выбранное окно закрыто или недоступно — выберите окно заново";
+            return exact;
+        }
+        // После ручной загрузки HWND не восстанавливается: заголовок допустим только при уникальном совпадении.
+        var matches = candidates.Where(w => !string.IsNullOrEmpty(zone.WindowTitle) && w.Title == zone.WindowTitle).ToList();
+        reason = matches.Count > 1 ? "Несколько окон с таким заголовком — выберите нужное окно"
+            : "Сохранённое окно не найдено — выберите окно заново";
+        return matches.Count == 1 ? matches[0] : null;
     }
 
     /// <summary>Выбирает окно для зоны: сначала на целевом мониторе, иначе ближайшее, не занятое другим монитором.</summary>
@@ -314,6 +367,7 @@ public static class LayoutApplier
     /// <summary>Добавляет пару «окно → зона» и пишет строку привязки в лог.</summary>
     private static void BindTarget(List<WindowTarget> targets, WindowInfo win, Zone zone, MonitorLayout layout, MonitorInfo monitor)
     {
+        zone.Status = "Готово к расстановке";
         var rect = ZoneToPixelRect(zone, monitor.WorkArea);
         DebugLog.Line($"  BIND {layout.DeviceName}/{zone.Name}: '{win.Title}' [{win.ProcessName}] hwnd={win.Handle} -> ({rect.X:F0},{rect.Y:F0},{rect.Width:F0}x{rect.Height:F0})");
         targets.Add(new WindowTarget(win.Handle, rect, layout, zone, monitor.WorkArea));
@@ -349,8 +403,8 @@ public static class LayoutApplier
             int h = Math.Max(1, (int)Math.Round(rect.Y + rect.Height) - y);
 
             IntPtr z = topmost ? Win32.HWND_TOPMOST : Win32.HWND_TOP;
-            // Без SWP_NOZORDER, иначе HWND_TOPMOST/HWND_TOP не применится к z-порядку.
-            if (!Win32.SetWindowPos(hwnd, z, x, y, w, h, Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW))
+            uint flags = Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW | (topmost ? 0 : Win32.SWP_NOZORDER);
+            if (!Win32.SetWindowPos(hwnd, z, x, y, w, h, flags))
             {
                 // Типичный случай: ошибка 5 (доступ запрещён) — целевое окно запущено
                 // от администратора, и Windows (UIPI) не даёт его двигать.
@@ -370,9 +424,9 @@ public static class LayoutApplier
                 int dl = outer.Left - visible.Left, dt = outer.Top - visible.Top;
                 int dr = outer.Right - visible.Right, db = outer.Bottom - visible.Bottom;
                 if (dl != 0 || dt != 0 || dr != 0 || db != 0)
-                    Win32.SetWindowPos(hwnd, z, x + dl, y + dt,
+                    return Win32.SetWindowPos(hwnd, z, x + dl, y + dt,
                         Math.Max(1, w - dl + dr), Math.Max(1, h - dt + db),
-                        Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW);
+                        flags);
             }
             return true;
         }
@@ -405,7 +459,7 @@ public static class LayoutApplier
     /// Если окно нельзя сжать до зоны (минимальный размер окна), его края могут выйти за рабочую
     /// область. Прижимаем окно обратно внутрь, чтобы оно не вылезало за экран.
     /// </summary>
-    private static void FitToWorkArea(IntPtr hwnd, Rect workArea)
+    internal static void FitToWorkArea(IntPtr hwnd, Rect workArea)
     {
         // Окно могло быть закрыто между перечислением и расстановкой.
         if (!Win32.IsWindow(hwnd)) return;
