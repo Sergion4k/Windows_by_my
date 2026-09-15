@@ -72,6 +72,7 @@ internal static class Win32
                     {
                         Handle = h,
                         DeviceName = mi.szDevice,
+                        Index = index + 1,
                         DisplayName = MonitorDisplayName(mi.szDevice, b, (mi.dwFlags & 1) != 0, index + 1),
                         Bounds = new Rect(b.Left, b.Top, b.Right - b.Left, b.Bottom - b.Top),
                         WorkArea = new Rect(w.Left, w.Top, w.Right - w.Left, w.Bottom - w.Top),

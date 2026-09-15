@@ -6,77 +6,124 @@
         mc:Ignorable="d"
         x:Name="Root"
         Title="Vindows — окна по зонам" Height="760" Width="1220" MinHeight="620" MinWidth="1050"
-                Icon="Vindows.ico" Background="{StaticResource AppBackgroundBrush}">
-        <Border Background="{StaticResource WindowGradient}" CornerRadius="16" Margin="6">
-            <Grid Margin="20">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
+        Icon="Vindows.ico" Background="{StaticResource AppBackgroundBrush}">
+    <Border Background="{StaticResource WindowGradient}" CornerRadius="16" Margin="6">
+        <Grid Margin="20">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Margin="0,0,0,4">
-          <WrapPanel>
-                        <Button x:Name="ApplyBtn" Content="Расставить окна" Padding="10,4" Click="ApplyBtn_Click" FontWeight="Bold"/>
-          </WrapPanel>
-          <WrapPanel Margin="0,10,0,0">
-            <CheckBox x:Name="ControlCheck" Content="Возвращать окна в зоны" VerticalAlignment="Center" Margin="0,0,20,6"/>
-            <CheckBox x:Name="TopmostCheck" Content="Держать окна поверх остальных" VerticalAlignment="Center" Margin="0,0,20,6"
-                      ToolTip="Работает независимо от возврата окон в зоны. При закрытии Vindows снимается включённый ею режим."/>
-          </WrapPanel>
-                    <TextBlock Text="Каждый запуск — с пустыми назначениями. Окна на другом мониторе возвращаются в исходную зону."
-                     Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" TextWrapping="Wrap"/>
-        </StackPanel>
+            <!-- Верхняя панель: расстановка, мониторы, сетка -->
+            <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="14" Padding="12,10">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
 
-        <Grid Grid.Row="1" Margin="0,10,0,0">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="230"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
+                    <Button x:Name="ApplyBtn" Content="Расставить окна" Padding="14,7" FontWeight="Bold"
+                            Click="ApplyBtn_Click" VerticalAlignment="Center"/>
 
-            <GroupBox Header="Мониторы" Grid.Column="0" Background="{StaticResource SurfaceBrush}">
-                <ListBox x:Name="MonitorsList" SelectionChanged="MonitorsList_SelectionChanged" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate><TextBlock Text="{Binding DisplayName}" TextWrapping="Wrap" Margin="3,6"/></DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
-            </GroupBox>
+                    <ListBox x:Name="MonitorTabs" Grid.Column="1" Margin="14,0,0,0"
+                             SelectionChanged="MonitorTabs_SelectionChanged"
+                             ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                             ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                             BorderThickness="0" Background="Transparent"
+                             VerticalAlignment="Center">
+                        <ListBox.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal"/>
+                            </ItemsPanelTemplate>
+                        </ListBox.ItemsPanel>
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="Padding" Value="0"/>
+                                <Setter Property="Margin" Value="0,0,8,0"/>
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="ListBoxItem">
+                                            <Border x:Name="TabBorder" Background="#F7F8FA" BorderBrush="#D8D8DE"
+                                                    BorderThickness="1.5" CornerRadius="12" Padding="10,8" MinWidth="118"
+                                                    Cursor="Hand">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Viewbox Width="22" Height="18" VerticalAlignment="Center">
+                                                        <Canvas Width="22" Height="18">
+                                                            <Rectangle Width="20" Height="13" RadiusX="1.5" RadiusY="1.5"
+                                                                       Stroke="#8E8E93" StrokeThickness="1.2" Fill="White"/>
+                                                            <Rectangle Canvas.Left="7" Canvas.Top="13" Width="6" Height="3"
+                                                                       RadiusX="1" RadiusY="1" Fill="#8E8E93"/>
+                                                        </Canvas>
+                                                    </Viewbox>
+                                                    <StackPanel Margin="8,0,0,0" VerticalAlignment="Center">
+                                                        <TextBlock Text="{Binding TabTitle}" FontWeight="SemiBold" FontSize="13"/>
+                                                        <TextBlock Text="{Binding ResolutionText}" FontSize="11"
+                                                                   Foreground="{StaticResource SecondaryTextBrush}" Margin="0,1,0,0"/>
+                                                    </StackPanel>
+                                                </StackPanel>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="TabBorder" Property="Background" Value="#EEF5FF"/>
+                                                    <Setter TargetName="TabBorder" Property="BorderBrush" Value="#99C7FF"/>
+                                                </Trigger>
+                                                <Trigger Property="IsSelected" Value="True">
+                                                    <Setter TargetName="TabBorder" Property="Background" Value="#E8F2FF"/>
+                                                    <Setter TargetName="TabBorder" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                                    <Setter TargetName="TabBorder" Property="BorderThickness" Value="2"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                    </ListBox>
 
-            <Grid Grid.Column="1" Margin="12,0,0,0">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-
-                <GroupBox Header="Разбиение выбранного монитора" Grid.Row="0" Background="{StaticResource SurfaceBrush}">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="56"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="56"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="56"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right"
+                                VerticalAlignment="Center">
+                        <TextBlock Text="Разбиение выбранного монитора:" VerticalAlignment="Center"
+                                   FontWeight="SemiBold" Margin="0,0,12,0"/>
                         <TextBlock Text="Колонки:" VerticalAlignment="Center"/>
-                        <TextBox x:Name="ColsBox" Grid.Column="1" Margin="4,0" VerticalContentAlignment="Center"/>
-                        <TextBlock Text="Строки:" Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Center"/>
-                        <TextBox x:Name="RowsBox" Grid.Column="3" Margin="4,0" VerticalContentAlignment="Center"/>
-                        <TextBlock Text="Зазор, px:" Grid.Column="4" Margin="12,0,0,0" VerticalAlignment="Center"/>
-                        <TextBox x:Name="GapBox" Grid.Column="5" Margin="4,0" VerticalContentAlignment="Center"/>
-                        <Button x:Name="ApplyGridBtn" Grid.Column="6" Content="Создать сетку" Margin="8,0,0,0" Padding="6,3" Click="ApplyGridBtn_Click"/>
-                    </Grid>
-                </GroupBox>
+                        <TextBox x:Name="ColsBox" Width="44" Margin="6,0,0,0" VerticalContentAlignment="Center"/>
+                        <TextBlock Text="Строки:" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                        <TextBox x:Name="RowsBox" Width="44" Margin="6,0,0,0" VerticalContentAlignment="Center"/>
+                        <TextBlock Text="Зазор, px:" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                        <TextBox x:Name="GapBox" Width="44" Margin="6,0,0,0" VerticalContentAlignment="Center"/>
+                        <Button x:Name="ApplyGridBtn" Content="Создать сетку" Margin="12,0,0,0" Padding="10,6"
+                                Click="ApplyGridBtn_Click"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
 
-                <GroupBox Header="Предпросмотр (рабочая область)" Grid.Row="1" Margin="0,12,0,0" Background="{StaticResource SurfaceBrush}">
+            <!-- Опции -->
+            <StackPanel Grid.Row="1" Margin="0,12,0,0">
+                <WrapPanel>
+                    <CheckBox x:Name="ControlCheck" Content="Возвращать окна в зоны" VerticalAlignment="Center" Margin="0,0,20,6"/>
+                    <CheckBox x:Name="TopmostCheck" Content="Держать окна поверх остальных" VerticalAlignment="Center" Margin="0,0,20,6"
+                              ToolTip="Работает независимо от возврата окон в зоны. При закрытии Vindows снимается включённый ею режим."/>
+                </WrapPanel>
+                <TextBlock Text="Каждый запуск — с пустыми назначениями. Окна на другом мониторе возвращаются в исходную зону."
+                           Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <!-- Предпросмотр на всю ширину -->
+            <GroupBox Grid.Row="2" Header="Предпросмотр (рабочая область)" Margin="0,12,0,0"
+                      Background="{StaticResource SurfaceBrush}">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Text="Перетащите окно на + в нужной ячейке — оно сразу привяжется и переместится." TextWrapping="Wrap" Margin="0,0,0,8" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Row="0"
+                               Text="Перетащите окно на + в нужной ячейке — оно сразу привяжется и переместится."
+                               TextWrapping="Wrap" Margin="0,0,0,8" FontWeight="SemiBold"/>
                     <Border Grid.Row="1" x:Name="PreviewFrame" CornerRadius="12" Background="#FF20242B">
                         <Canvas x:Name="PreviewCanvas" Background="#FF20242B"
                                 AllowDrop="True"
@@ -87,14 +134,14 @@
                                 DragOver="PreviewCanvas_DragOver"
                                 Drop="PreviewCanvas_Drop"/>
                     </Border>
-                    <TextBlock Grid.Row="2" Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap"
+                    <TextBlock Grid.Row="2" Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource SecondaryTextBrush}"
+                               TextWrapping="Wrap"
                                Text="Перетаскивайте ручки на разделителях, чтобы менять пропорции областей."/>
                 </Grid>
-                </GroupBox>
-            </Grid>
-        </Grid>
+            </GroupBox>
 
-        <TextBlock x:Name="StatusText" Grid.Row="2" Margin="0,12,0,0" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap"/>
-            </Grid>
-        </Border>
+            <TextBlock x:Name="StatusText" Grid.Row="3" Margin="0,12,0,0"
+                       Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap"/>
+        </Grid>
+    </Border>
 </Window>

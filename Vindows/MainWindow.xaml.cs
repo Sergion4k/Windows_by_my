@@ -203,8 +203,8 @@ public partial class MainWindow : Window
         foreach (var m in _monitors)
             GetLayoutFor(m);
 
-        MonitorsList.ItemsSource = _monitors;
-        MonitorsList.SelectedIndex = _monitors.Count > 0 ? 0 : -1;
+        MonitorTabs.ItemsSource = _monitors;
+        MonitorTabs.SelectedIndex = _monitors.Count > 0 ? 0 : -1;
         RefreshWindows();
 
         // Галочка управляет контролем окон; подписываемся после установки значения,
@@ -496,9 +496,9 @@ public partial class MainWindow : Window
 
     // ---------- Обработчики ----------
 
-    private void MonitorsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void MonitorTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        _currentMonitor = MonitorsList.SelectedItem as MonitorInfo;
+        _currentMonitor = MonitorTabs.SelectedItem as MonitorInfo;
         SetupCurrentMonitorUI();
     }
 
@@ -546,9 +546,9 @@ public partial class MainWindow : Window
         foreach (var m in _monitors)
             GetLayoutFor(m);
 
-        MonitorsList.ItemsSource = null;
-        MonitorsList.ItemsSource = _monitors;
-        MonitorsList.SelectedItem = selectedDevice != null
+        MonitorTabs.ItemsSource = null;
+        MonitorTabs.ItemsSource = _monitors;
+        MonitorTabs.SelectedItem = selectedDevice != null
             ? _monitors.FirstOrDefault(m => m.DeviceName == selectedDevice) ?? _monitors.FirstOrDefault()
             : _monitors.FirstOrDefault();
 

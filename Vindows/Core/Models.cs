@@ -10,6 +10,10 @@ public sealed class MonitorInfo
 
     public required string DeviceName { get; init; }
     public required string DisplayName { get; init; }
+    public int Index { get; init; }
+
+    public string TabTitle => $"Монитор {Index}";
+    public string ResolutionText => $"{(int)Bounds.Width}×{(int)Bounds.Height}";
 
     /// <summary>Весь монитор (физические пиксели).</summary>
     public required Rect Bounds { get; init; }
