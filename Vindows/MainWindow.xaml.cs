@@ -23,6 +23,8 @@ namespace Vindows;
 
 public partial class MainWindow : Window
 {
+    private const int MaxColumns = 8;
+    private const int MaxRows = 4;
     private readonly List<MonitorInfo> _monitors = new();
     private readonly List<MonitorLayout> _layouts = new();
     private List<WindowInfo> _windows = new();
@@ -43,8 +45,8 @@ public partial class MainWindow : Window
     private bool _leftButtonWasDown;
     private WindowInfo? _externalDragWindow;
 
-    /// <summary>Разделитель сетки: вертикальный (между колонками) или горизонтальный (между строками).</summary>
-    private sealed record GripData(bool IsVertical, int Index);
+    /// <summary>Общая вертикальная граница колонок или горизонтальная граница пары ячеек.</summary>
+    private sealed record GripData(bool IsVertical, int FirstIndex, int SecondIndex);
 
     public MainWindow()
     {
@@ -162,9 +164,9 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Общий путь повторной расстановки: расставить окна, поднять своё окно, перерисовать UI.</summary>
-    private ApplyResult ReapplyAll()
+    private ApplyResult ReapplyAll(IReadOnlySet<Zone>? zonesToPlace = null)
     {
-        var result = _watcher.Reapply(_layouts, _monitors);
+        var result = _watcher.Reapply(_layouts, _monitors, zonesToPlace);
         if (TopmostCheck.IsChecked == true) RaiseToTopmost();
         RebuildZoneList();
         RedrawPreview();
@@ -405,28 +407,29 @@ public partial class MainWindow : Window
         // Горизонтальные разделители (между строками).
         for (int r = 0; r < rows - 1; r++)
         {
-            var zone = zones[r * cols];
-            var below = zones[(r + 1) * cols];
-            double sepY = oy + (zone.Y + zone.Height + below.Y) / 200.0 * waH;
-            var line = new Rectangle { Width = waW, Height = 1, Fill = lineBrush };
-            Canvas.SetLeft(line, ox);
-            Canvas.SetTop(line, sepY);
-            PreviewCanvas.Children.Add(line);
             for (int c = 0; c < cols; c++)
             {
                 var cell = zones[r * cols + c];
-                PreviewCanvas.Children.Add(CreateGrip(new GripData(false, r),
-                    ox + (cell.X + cell.Width / 2) / 100.0 * waW, sepY,
-                    cell.Width / 100.0 * waW));
+                var below = zones[(r + 1) * cols + c];
+                double start = Math.Max(cell.X, below.X);
+                double end = Math.Min(cell.X + cell.Width, below.X + below.Width);
+                if (end <= start) continue;
+                double sepY = oy + (cell.Y + cell.Height + below.Y) / 200.0 * waH;
+                var line = new Rectangle { Width = (end - start) / 100.0 * waW, Height = 1, Fill = lineBrush };
+                Canvas.SetLeft(line, ox + start / 100.0 * waW);
+                Canvas.SetTop(line, sepY);
+                PreviewCanvas.Children.Add(line);
+                PreviewCanvas.Children.Add(CreateGrip(new GripData(false, r * cols + c, (r + 1) * cols + c),
+                    ox + (start + end) / 200.0 * waW, sepY, line.Width));
             }
         }
 
         // Вертикальные разделители (между колонками) — поверх горизонтальных.
         for (int c = 0; c < cols - 1; c++)
         {
-            var zone = zones[c];
+            var left = zones[c];
             var right = zones[c + 1];
-            double sepX = ox + (zone.X + zone.Width + right.X) / 200.0 * waW;
+            double sepX = ox + (left.X + left.Width + right.X) / 200.0 * waW;
             var line = new Rectangle { Width = 1, Height = waH, Fill = lineBrush };
             Canvas.SetLeft(line, sepX);
             Canvas.SetTop(line, oy);
@@ -434,9 +437,8 @@ public partial class MainWindow : Window
             for (int r = 0; r < rows; r++)
             {
                 var cell = zones[r * cols + c];
-                PreviewCanvas.Children.Add(CreateGrip(new GripData(true, c), sepX,
-                    oy + (cell.Y + cell.Height / 2) / 100.0 * waH,
-                    cell.Height / 100.0 * waH));
+                PreviewCanvas.Children.Add(CreateGrip(new GripData(true, r * cols + c, r * cols + c + 1),
+                    sepX, oy + (cell.Y + cell.Height / 2) / 100.0 * waH, cell.Height / 100.0 * waH));
             }
         }
     }
@@ -452,7 +454,8 @@ public partial class MainWindow : Window
             Height = vertical ? length : 16,
             Background = Brushes.Transparent,
             Cursor = vertical ? Cursors.SizeWE : Cursors.SizeNS,
-            ToolTip = vertical ? "Изменить ширину соседних колонок" : "Изменить высоту соседних строк",
+            ToolTip = vertical ? "Общая ширина двух соседних колонок"
+                : $"Высота ячеек {data.FirstIndex + 1} и {data.SecondIndex + 1}",
             Child = new Border
             {
                 Width = vertical ? 8 : Math.Min(30, length),
@@ -490,23 +493,8 @@ public partial class MainWindow : Window
         int cols = layout.Columns, rows = layout.Rows;
         if (zones.Count != cols * rows) return "";
 
-        double left = 0, right = 0;
-        if (grip.IsVertical)
-        {
-            for (int r = 0; r < rows; r++)
-            {
-                left += zones[r * cols + grip.Index].Width;
-                right += zones[r * cols + grip.Index + 1].Width;
-            }
-        }
-        else
-        {
-            for (int c = 0; c < cols; c++)
-            {
-                left += zones[grip.Index * cols + c].Height;
-                right += zones[(grip.Index + 1) * cols + c].Height;
-            }
-        }
+        double left = grip.IsVertical ? zones[grip.FirstIndex].Width : zones[grip.FirstIndex].Height;
+        double right = grip.IsVertical ? zones[grip.SecondIndex].Width : zones[grip.SecondIndex].Height;
 
         double total = left + right;
         return total <= 0 ? "" : $"{left / total * 100:0}% / {right / total * 100:0}%";
@@ -523,8 +511,10 @@ public partial class MainWindow : Window
     private void ApplyGridBtn_Click(object sender, RoutedEventArgs e)
     {
         if (_currentLayout == null || _currentMonitor == null) return;
-        if (!int.TryParse(ColsBox.Text, out var cols) || cols < 1) { StatusText.Text = "Колонки: введите число ≥ 1"; return; }
-        if (!int.TryParse(RowsBox.Text, out var rows) || rows < 1) { StatusText.Text = "Строки: введите число ≥ 1"; return; }
+        if (!int.TryParse(ColsBox.Text, out var cols) || cols < 1 || cols > MaxColumns)
+        { StatusText.Text = $"Колонки: введите число от 1 до {MaxColumns}"; return; }
+        if (!int.TryParse(RowsBox.Text, out var rows) || rows < 1 || rows > MaxRows)
+        { StatusText.Text = $"Строки: введите число от 1 до {MaxRows}"; return; }
         if (!int.TryParse(GapBox.Text, out var gap) || gap < 0 || gap > 100) { StatusText.Text = "Зазор: введите число 0..100"; return; }
 
         var newZones = LayoutApplier.BuildGridZones(cols, rows, gap, _currentMonitor.WorkArea);
@@ -816,8 +806,10 @@ public partial class MainWindow : Window
             : (pos.Y - _dragLast.Y) / (_currentMonitor.WorkArea.Height * scale) * 100.0;
 
         double applied = _dragGrip.IsVertical
-            ? LayoutApplier.MoveVerticalSplitter(_currentLayout.Zones, _currentLayout.Columns, _dragGrip.Index, delta)
-            : LayoutApplier.MoveHorizontalSplitter(_currentLayout.Zones, _currentLayout.Columns, _dragGrip.Index, delta);
+            ? LayoutApplier.MoveVerticalSplitter(_currentLayout.Zones,
+                _currentLayout.Columns, _dragGrip.FirstIndex % _currentLayout.Columns, delta)
+            : LayoutApplier.MoveCellSplitter(_currentLayout.Zones,
+                _dragGrip.FirstIndex, _dragGrip.SecondIndex, false, delta);
         if (Math.Abs(applied) < 1e-9) return;
         _splitterChanged = true;
 
@@ -852,7 +844,8 @@ public partial class MainWindow : Window
         RebuildZoneList();
         if (ControlCheck.IsChecked == true)
         {
-            var result = ReapplyAll();
+            var result = ReapplyAll(GetSplitterZones(_currentLayout!,
+                grip.FirstIndex, grip.SecondIndex, grip.IsVertical));
             StatusText.Text = $"Разделитель зафиксирован: {SplitStatus(grip)}. Размещено окон: {result.Placed}." + ApplyNotes(result);
         }
         else
@@ -861,6 +854,11 @@ public partial class MainWindow : Window
             StatusText.Text = $"Разделитель зафиксирован: {SplitStatus(grip)}. Нажмите «Расставить окна», чтобы применить.";
         }
     }
+
+    internal static HashSet<Zone> GetSplitterZones(MonitorLayout layout, int firstIndex, int secondIndex, bool vertical) =>
+        vertical ? layout.Zones.Where((_, index) => index % layout.Columns == firstIndex % layout.Columns ||
+                index % layout.Columns == secondIndex % layout.Columns).ToHashSet()
+            : new HashSet<Zone> { layout.Zones[firstIndex], layout.Zones[secondIndex] };
 
     /// <summary>Сообщение о подстройке сетки, окнах, которые не поместились, и окнах без прав на перемещение.</summary>
     private static string ApplyNotes(ApplyResult result) =>

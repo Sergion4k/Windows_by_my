@@ -92,7 +92,7 @@ public sealed class WindowWatcher : IDisposable
     }
 
     /// <summary>Расставляет окна с сохранением старых привязок и обновляет карту контроля.</summary>
-    public ApplyResult Reapply(List<MonitorLayout> layouts, List<MonitorInfo> monitors)
+    public ApplyResult Reapply(List<MonitorLayout> layouts, List<MonitorInfo> monitors, IReadOnlySet<Zone>? zonesToPlace = null)
     {
         _layouts = layouts;
         _monitors = monitors;
@@ -102,7 +102,7 @@ public sealed class WindowWatcher : IDisposable
         try
         {
             var result = LayoutApplier.Apply(layouts, monitors, out var placed, _targets,
-                MonitorMoveBehavior == MonitorMoveBehavior.ReturnToZone);
+                MonitorMoveBehavior == MonitorMoveBehavior.ReturnToZone, zonesToPlace);
             SetTargets(placed);
             ApplyTopmost();
             return result;

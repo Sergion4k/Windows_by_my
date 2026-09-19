@@ -16,15 +16,19 @@ public static class LayoutApplier
     /// placed — фактические прямоугольники окон после расстановки (могут отличаться от зоны,
     /// если окно нельзя сжать до её размера).
     /// </summary>
-    public static ApplyResult Apply(List<MonitorLayout> layouts, List<MonitorInfo> monitors, out List<WindowTarget> placed, List<WindowTarget>? current = null, bool keepExistingAcrossMonitors = false)
+    public static ApplyResult Apply(List<MonitorLayout> layouts, List<MonitorInfo> monitors, out List<WindowTarget> placed,
+        List<WindowTarget>? current = null, bool keepExistingAcrossMonitors = false, IReadOnlySet<Zone>? zonesToPlace = null)
     {
         DebugLog.Line("=== Apply: расстановка ===");
+        var previousStatuses = zonesToPlace == null ? null : layouts.SelectMany(l => l.Zones)
+            .Where(z => !zonesToPlace.Contains(z)).ToDictionary(z => z, z => z.Status);
         var targets = BuildTargets(layouts, monitors, out var missing, current, keepExistingAcrossMonitors);
         bool adjusted = false;
 
         // Несколько проходов: расширение одной зоны может сделать соседнюю слишком узкой,
         // поэтому измеряем и подстраиваем, пока все окна не встанут или сетка не упрётся в минимум.
-        for (int pass = 0; pass < 4; pass++)
+        // Ручная настройка пары не запускает автоподгонку всей сетки.
+        for (int pass = 0; zonesToPlace == null && pass < 4; pass++)
         {
             bool resized = false;
             foreach (var t in targets)
@@ -39,8 +43,7 @@ public static class LayoutApplier
                     double overflowH = vis.Height - t.Rect.Height;
                     if (overflowW <= 2 && overflowH <= 2) continue;
                     DebugLog.Line($"  FIT pass={pass} зона={t.Zone.Name} не влезает на {overflowW:F0}x{overflowH:F0}px — расширяю зону");
-                    ExpandZoneToFit(t, overflowW, overflowH);
-                    resized = true;
+                    resized |= ExpandZoneToFit(t, overflowW, overflowH);
                 }
                 catch (Exception ex)
                 {
@@ -60,6 +63,12 @@ public static class LayoutApplier
         var denied = new List<string>();
         foreach (var t in targets)
         {
+            if (zonesToPlace != null && !zonesToPlace.Contains(t.Zone))
+            {
+                t.Zone.Status = previousStatuses![t.Zone];
+                placed.Add(t);
+                continue;
+            }
             try
             {
                 // Окно могло быть закрыто между перечислением и расстановкой.
@@ -105,41 +114,44 @@ public static class LayoutApplier
         }
 
         DebugLog.Line($"  ИТОГ: размещено={placed.Count}, не найдено=[{string.Join(", ", missing)}], oversized=[{string.Join(", ", oversized)}], нет прав=[{string.Join(", ", denied)}]");
-        return new ApplyResult { Placed = placed.Count, Missing = missing, Oversized = oversized, Denied = denied, GridAdjusted = adjusted };
+        return new ApplyResult { Placed = placed.Count(t => zonesToPlace == null || zonesToPlace.Contains(t.Zone)),
+            Missing = missing, Oversized = oversized, Denied = denied, GridAdjusted = adjusted };
     }
 
     /// <summary>
     /// Расширяет зону окна за счёт соседней колонки/строки, если окно не помещается.
     /// overflowW/overflowH — на сколько пикселей окно больше зоны.
     /// </summary>
-    private static void ExpandZoneToFit(WindowTarget t, double overflowW, double overflowH)
+    private static bool ExpandZoneToFit(WindowTarget t, double overflowW, double overflowH)
     {
         var zones = t.Layout.Zones;
         int columns = t.Layout.Columns;
         int idx = zones.IndexOf(t.Zone);
-        if (idx < 0 || columns < 1 || zones.Count % columns != 0) return;
+        if (idx < 0 || columns < 1 || zones.Count % columns != 0) return false;
         // Вырожденная рабочая область дала бы NaN/бесконечность в процентах — не расширяем.
-        if (t.WorkArea.Width <= 0 || t.WorkArea.Height <= 0) return;
+        if (t.WorkArea.Width <= 0 || t.WorkArea.Height <= 0) return false;
         int rows = zones.Count / columns;
         int col = idx % columns, row = idx / columns;
+        bool changed = false;
 
         if (overflowW > 2 && columns > 1)
         {
             double need = overflowW / t.WorkArea.Width * 100.0;
             // Растём в сторону соседа: вправо, если справа есть колонка, иначе влево.
             if (col < columns - 1)
-                MoveVerticalSplitter(zones, columns, col, need);
+                changed |= MoveVerticalSplitter(zones, columns, col, need) != 0;
             else
-                MoveVerticalSplitter(zones, columns, col - 1, -need);
+                changed |= MoveVerticalSplitter(zones, columns, col - 1, -need) != 0;
         }
         if (overflowH > 2 && rows > 1)
         {
             double need = overflowH / t.WorkArea.Height * 100.0;
             if (row < rows - 1)
-                MoveHorizontalSplitter(zones, columns, row, need);
+                changed |= MoveCellSplitter(zones, idx, idx + columns, false, need) != 0;
             else
-                MoveHorizontalSplitter(zones, columns, row - 1, -need);
+                changed |= MoveCellSplitter(zones, idx - columns, idx, false, -need) != 0;
         }
+        return changed;
     }
 
     /// <summary>Сопоставляет назначенные приложения с открытыми окнами: пары «окно → область в пикселях».
@@ -546,6 +558,57 @@ public static class LayoutApplier
 
     /// <summary>Минимальный размер области в процентах от рабочей области — меньше разделитель не сожмёт.</summary>
     public const double MinZonePercent = 4.0;
+
+    /// <summary>Двигает общую границу только двух ячеек. Остальные зоны не изменяются.</summary>
+    public static double MoveCellSplitter(List<Zone> zones, int firstIndex, int secondIndex,
+        bool vertical, double deltaPercent)
+    {
+        if (!double.IsFinite(deltaPercent) || firstIndex < 0 || secondIndex < 0 ||
+            firstIndex >= zones.Count || secondIndex >= zones.Count || firstIndex == secondIndex)
+            return 0;
+        var first = zones[firstIndex];
+        var second = zones[secondIndex];
+        double Start(Zone z) => vertical ? z.X : z.Y;
+        double Size(Zone z) => vertical ? z.Width : z.Height;
+        double CrossStart(Zone z) => vertical ? z.Y : z.X;
+        double CrossEnd(Zone z) => vertical ? z.Y + z.Height : z.X + z.Width;
+        bool SharesSpan(Zone a, Zone b) =>
+            Math.Min(CrossEnd(a), CrossEnd(b)) - Math.Max(CrossStart(a), CrossStart(b)) > 1e-9;
+
+        double gap = Start(second) - Start(first) - Size(first);
+        if (gap < -1e-9 || !SharesSpan(first, second)) return 0;
+        gap = Math.Max(0, gap);
+        double minDelta = Math.Max(MinZonePercent - Size(first), -Start(second));
+        double maxDelta = Math.Min(Size(second) - MinZonePercent, 100 - Start(first) - Size(first));
+
+        // После независимых сдвигов границы могут стать ступенчатыми.
+        // Расширение останавливается у третьей ячейки, сохраняя зазор.
+        foreach (var other in zones)
+        {
+            if (other == first || other == second) continue;
+            if (SharesSpan(first, other) && Start(other) >= Start(first) + Size(first) - 1e-9)
+                maxDelta = Math.Min(maxDelta, Math.Max(0, Start(other) - Start(first) - Size(first) - gap));
+            if (SharesSpan(second, other) && Start(other) + Size(other) <= Start(second) + 1e-9)
+                minDelta = Math.Max(minDelta, -Math.Max(0, Start(second) - Start(other) - Size(other) - gap));
+        }
+
+        if (minDelta > maxDelta) return 0;
+        double delta = Math.Clamp(deltaPercent, minDelta, maxDelta);
+        if (Math.Abs(delta) < 1e-9) return 0;
+        if (vertical)
+        {
+            first.Width += delta;
+            second.X += delta;
+            second.Width -= delta;
+        }
+        else
+        {
+            first.Height += delta;
+            second.Y += delta;
+            second.Height -= delta;
+        }
+        return delta;
+    }
 
     /// <summary>
     /// Сдвигает вертикальный разделитель: зоны слева меняют ширину на delta, справа — на −delta.

@@ -217,6 +217,93 @@ Check(LayoutApplier.MoveVerticalSplitter(dragGrid, 3, 0, double.NaN) == 0 &&
     LayoutApplier.MoveHorizontalSplitter(dragGrid, 3, 0, double.PositiveInfinity) == 0,
     "Invalid drag coordinates leave the grid unchanged");
 
+var pairGrid = LayoutApplier.BuildGridZones(2, 2, 4, primary.WorkArea);
+Rect Geometry(Zone zone) => new(zone.X, zone.Y, zone.Width, zone.Height);
+var pairBefore = pairGrid.Select(Geometry).ToArray();
+Check(LayoutApplier.MoveCellSplitter(pairGrid, 0, 1, true, 10) == 10 &&
+    pairGrid[0].Width == pairBefore[0].Width + 10 &&
+    pairGrid[1].Width == pairBefore[1].Width - 10 &&
+    Geometry(pairGrid[2]) == pairBefore[2] && Geometry(pairGrid[3]) == pairBefore[3],
+    "Dragging the upper vertical grip changes only cells 1 and 2");
+pairBefore = pairGrid.Select(Geometry).ToArray();
+Check(LayoutApplier.MoveCellSplitter(pairGrid, 2, 3, true, -5) == -5 &&
+    Geometry(pairGrid[0]) == pairBefore[0] && Geometry(pairGrid[1]) == pairBefore[1],
+    "The lower vertical grip moves independently of the upper grip");
+pairGrid = LayoutApplier.BuildGridZones(2, 2, 4, primary.WorkArea);
+pairBefore = pairGrid.Select(Geometry).ToArray();
+Check(LayoutApplier.MoveCellSplitter(pairGrid, 0, 2, false, 10) == 10 &&
+    pairGrid[0].Height == pairBefore[0].Height + 10 &&
+    pairGrid[2].Height == pairBefore[2].Height - 10 &&
+    Geometry(pairGrid[1]) == pairBefore[1] && Geometry(pairGrid[3]) == pairBefore[3],
+    "Dragging the left horizontal grip changes only cells 1 and 3");
+pairBefore = pairGrid.Select(Geometry).ToArray();
+Check(LayoutApplier.MoveCellSplitter(pairGrid, 0, 1, true, 10) == 0 &&
+    pairGrid.Select(Geometry).SequenceEqual(pairBefore),
+    "A staggered border stops before overlapping a third cell");
+Check(LayoutApplier.MoveCellSplitter(pairGrid, 0, 1, true, -5) == -5,
+    "A staggered border can still move in the unobstructed direction");
+Check(LayoutApplier.MoveCellSplitter(pairGrid, -1, 1, true, 2) == 0 &&
+    LayoutApplier.MoveCellSplitter(pairGrid, 0, 99, true, 2) == 0 &&
+    LayoutApplier.MoveCellSplitter(pairGrid, 0, 0, true, 2) == 0 &&
+    LayoutApplier.MoveCellSplitter(pairGrid, 0, 1, true, double.NaN) == 0,
+    "Invalid cell pairs and drag coordinates do not change zones");
+
+var sharedRows = new MonitorLayout
+{
+    DeviceName = primary.DeviceName, Columns = 3, Rows = 3,
+    Zones = LayoutApplier.BuildGridZones(3, 3, 4, primary.WorkArea),
+};
+LayoutApplier.MoveCellSplitter(sharedRows.Zones, 0, 1, true, 7);
+LayoutApplier.MoveCellSplitter(sharedRows.Zones, 3, 4, true, -5);
+var sharedBefore = sharedRows.Zones.Select(Geometry).ToArray();
+Check(LayoutApplier.MoveHorizontalSplitter(sharedRows.Zones, 3, 0, 8) == 8 &&
+    Enumerable.Range(0, 3).All(c =>
+        sharedRows.Zones[c].Height == sharedBefore[c].Height + 8 &&
+        sharedRows.Zones[3 + c].Height == sharedBefore[3 + c].Height - 8) &&
+    Enumerable.Range(0, 9).All(i => sharedRows.Zones[i].Width == sharedBefore[i].Width &&
+        sharedRows.Zones[i].X == sharedBefore[i].X) &&
+    Enumerable.Range(6, 3).All(i => Geometry(sharedRows.Zones[i]) == sharedBefore[i]),
+    "Up-down movement changes both full rows and preserves their independent column widths");
+Check(Vindows.MainWindow.GetSplitterZones(sharedRows, 1, 4, false)
+    .SetEquals(new[] { sharedRows.Zones[1], sharedRows.Zones[4] }),
+    "An up-down drag reapplies only the selected cell pair");
+Check(Vindows.MainWindow.GetSplitterZones(sharedRows, 3, 4, true)
+    .SetEquals(sharedRows.Zones.Where((_, index) => index % sharedRows.Columns is 0 or 1)),
+    "A left-right drag reapplies both adjacent columns across all rows");
+
+var random = new Random(42);
+foreach (int gap in new[] { 0, 8 })
+{
+    var independentGrid = LayoutApplier.BuildGridZones(4, 3, gap, primary.WorkArea);
+    for (int step = 0; step < 500; step++)
+    {
+        bool vertical = random.Next(2) == 0;
+        int row = random.Next(vertical ? 3 : 2);
+        int col = random.Next(vertical ? 3 : 4);
+        int a = row * 4 + col, b = a + (vertical ? 1 : 4);
+        var before = independentGrid.Select(Geometry).ToArray();
+        int delta = random.Next(-100, 101);
+        if (vertical) LayoutApplier.MoveCellSplitter(independentGrid, a, b, true, delta);
+        else LayoutApplier.MoveHorizontalSplitter(independentGrid, 4, row, delta);
+        var after = independentGrid.Select(Geometry).ToArray();
+        bool valid = after.Select((rect, index) => (rect, index)).All(item =>
+            ((vertical ? item.index == a || item.index == b : item.index / 4 == row || item.index / 4 == row + 1)
+                || item.rect == before[item.index]) &&
+            item.rect.Width >= LayoutApplier.MinZonePercent - 1e-8 &&
+            item.rect.Height >= LayoutApplier.MinZonePercent - 1e-8 &&
+            item.rect.Left >= -1e-8 && item.rect.Top >= -1e-8 &&
+            item.rect.Right <= 100 + 1e-8 && item.rect.Bottom <= 100 + 1e-8);
+        for (int i = 0; i < after.Length; i++)
+            for (int j = i + 1; j < after.Length; j++)
+            {
+                var overlap = Rect.Intersect(after[i], after[j]);
+                valid &= overlap.IsEmpty || overlap.Width <= 1e-8 || overlap.Height <= 1e-8;
+            }
+        if (!valid) throw new InvalidOperationException($"Independent resize failed: gap={gap}, step={step}");
+    }
+    Check(true, $"500 pair-width and shared-row drags preserve other cells, bounds and non-overlap (gap {gap})");
+}
+
 // Только собственное скрытое окно теста: окна пользователя не затрагиваются.
 Exception? nativeFailure = null;
 var nativeThread = new Thread(() =>
