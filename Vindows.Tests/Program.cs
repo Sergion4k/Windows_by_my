@@ -186,6 +186,72 @@ Check(Vindows.MainWindow.ZonePosition(1, 2, 1) == "справа" && Vindows.Main
 Check(Win32.MonitorDisplayName("DISPLAY2", new Win32.RECT { Left = -2560, Top = -300, Right = 0, Bottom = 1100 }, false, 1)
     == "Монитор 2 · 2560×1400 · слева, выше", "Monitor labels use device numbers and relative positions");
 
+Check(Vindows.MainWindow.HaveSameMonitors(monitors, monitors.AsEnumerable().Reverse().ToList()),
+    "Unchanged monitors do not trigger background placement, regardless of enumeration order");
+Check(!Vindows.MainWindow.HaveSameMonitors(monitors,
+    [Monitor("primary", new Rect(0, 0, 1920, 1000)), secondary]),
+    "A changed work area triggers a monitor refresh");
+Check(!Vindows.MainWindow.HaveSameMonitors(monitors, [primary]),
+    "Disconnecting a monitor triggers a refresh");
+
+var dragGrid = LayoutApplier.BuildGridZones(3, 3, 8, primary.WorkArea);
+double horizontalGap = dragGrid[1].X - dragGrid[0].X - dragGrid[0].Width;
+double verticalGap = dragGrid[3].Y - dragGrid[0].Y - dragGrid[0].Height;
+var unaffected = dragGrid[2].Width;
+Check(LayoutApplier.MoveVerticalSplitter(dragGrid, 3, 0, 7) == 7 &&
+    Enumerable.Range(0, 3).All(row => Math.Abs(dragGrid[row * 3].Width - dragGrid[0].Width) < 1e-9) &&
+    Math.Abs(dragGrid[1].X - dragGrid[0].X - dragGrid[0].Width - horizontalGap) < 1e-9 &&
+    dragGrid[2].Width == unaffected,
+    "A vertical grip resizes adjacent columns across all rows, preserving gaps and other columns");
+Check(LayoutApplier.MoveHorizontalSplitter(dragGrid, 3, 1, -6) == -6 &&
+    Enumerable.Range(0, 3).All(col => Math.Abs(dragGrid[3 + col].Height - dragGrid[3].Height) < 1e-9) &&
+    Math.Abs(dragGrid[6].Y - dragGrid[3].Y - dragGrid[3].Height - verticalGap) < 1e-9,
+    "A horizontal grip resizes adjacent rows across all columns and preserves gaps");
+LayoutApplier.MoveVerticalSplitter(dragGrid, 3, 0, 1000);
+LayoutApplier.MoveHorizontalSplitter(dragGrid, 3, 0, -1000);
+Check(dragGrid.All(zone => zone.Width >= LayoutApplier.MinZonePercent - 1e-9 &&
+    zone.Height >= LayoutApplier.MinZonePercent - 1e-9 && zone.X >= 0 && zone.Y >= 0 &&
+    zone.X + zone.Width <= 100.000001 && zone.Y + zone.Height <= 100.000001),
+    "Dragging beyond the preview keeps zones inside the monitor and above minimum size");
+Check(LayoutApplier.MoveVerticalSplitter(dragGrid, 3, 0, double.NaN) == 0 &&
+    LayoutApplier.MoveHorizontalSplitter(dragGrid, 3, 0, double.PositiveInfinity) == 0,
+    "Invalid drag coordinates leave the grid unchanged");
+
+// Только собственное скрытое окно теста: окна пользователя не затрагиваются.
+Exception? nativeFailure = null;
+var nativeThread = new Thread(() =>
+{
+    try
+    {
+        using var source = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("Vindows placement test")
+        {
+            WindowStyle = unchecked((int)0x80000000), Width = 400, Height = 300,
+            PositionX = 100, PositionY = 100,
+        });
+        int positionChanges = 0;
+        source.AddHook((IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled) =>
+        {
+            if (message == 0x0047) positionChanges++; // WM_WINDOWPOSCHANGED
+            return IntPtr.Zero;
+        });
+        var target = new Rect(120, 130, 500, 350);
+        Check(LayoutApplier.MoveTo(source.Handle, target) &&
+            LayoutApplier.IsAtTargetPosition(source.Handle, target, 1) && positionChanges == 1,
+            "Placement reaches the target with a single native position change");
+        bool repeatedPlacementSucceeded = true;
+        for (int i = 0; i < 10; i++)
+            repeatedPlacementSucceeded &= LayoutApplier.MoveTo(source.Handle, target);
+        Check(repeatedPlacementSucceeded && positionChanges == 1,
+            "Ten repeated placements succeed without redundant native position changes");
+        Check(!Win32.IsWindowVisible(source.Handle), "Placement does not force hidden windows to appear");
+    }
+    catch (Exception ex) { nativeFailure = ex; }
+});
+nativeThread.SetApartmentState(ApartmentState.STA);
+nativeThread.Start();
+nativeThread.Join();
+if (nativeFailure != null) throw new InvalidOperationException("Native placement regression", nativeFailure);
+
 Console.WriteLine($"{passed} checks passed.");
 
 static MonitorInfo Monitor(string name, Rect area) => new()

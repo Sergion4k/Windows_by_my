@@ -162,6 +162,9 @@ internal static class Win32
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hWnd);
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);

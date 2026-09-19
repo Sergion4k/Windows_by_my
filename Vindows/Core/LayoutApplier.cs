@@ -396,6 +396,12 @@ public static class LayoutApplier
             if (Win32.IsIconic(hwnd) || Win32.IsZoomed(hwnd))
                 Win32.ShowWindow(hwnd, Win32.SW_RESTORE);
 
+            // Повторная расстановка не должна менять размер уже размещённого окна.
+            if (IsAtTargetPosition(hwnd, rect, 1))
+                return !topmost || Win32.IsTopmost(hwnd) || Win32.SetWindowPos(hwnd,
+                    Win32.HWND_TOPMOST, 0, 0, 0, 0,
+                    Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
+
             int x = (int)Math.Round(rect.X);
             int y = (int)Math.Round(rect.Y);
             // Считаем размер от округлённых краёв, чтобы соседние области стыковались без щелей.
@@ -403,8 +409,14 @@ public static class LayoutApplier
             int h = Math.Max(1, (int)Math.Round(rect.Y + rect.Height) - y);
 
             IntPtr z = topmost ? Win32.HWND_TOPMOST : Win32.HWND_TOP;
-            uint flags = Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW | (topmost ? 0 : Win32.SWP_NOZORDER);
-            if (!Win32.SetWindowPos(hwnd, z, x, y, w, h, flags))
+            uint flags = Win32.SWP_NOACTIVATE | (topmost ? 0 : Win32.SWP_NOZORDER);
+            // Измеряем невидимую рамку ДО перемещения: обычному окну достаточно
+            // одного SetWindowPos, без промежуточного уменьшения и мерцания.
+            var frame = GetFrameOffsets(hwnd);
+            var dpi = Win32.GetDpiForWindow(hwnd);
+            if (!Win32.SetWindowPos(hwnd, z, x + frame.Left, y + frame.Top,
+                    Math.Max(1, w - frame.Left + frame.Right),
+                    Math.Max(1, h - frame.Top + frame.Bottom), flags))
             {
                 // Типичный случай: ошибка 5 (доступ запрещён) — целевое окно запущено
                 // от администратора, и Windows (UIPI) не даёт его двигать.
@@ -412,21 +424,15 @@ public static class LayoutApplier
                 return false;
             }
 
-            // Невидимые рамки (тень DWM) у каждого окна свои: сдвигаем окно так,
-            // чтобы его видимая часть совпала с заданным прямоугольником.
-            if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_EXTENDED_FRAME_BOUNDS, out Win32.RECT visible, Marshal.SizeOf<Win32.RECT>()) == 0 &&
-                Win32.GetWindowRect(hwnd, out var outer))
+            // При переходе между мониторами с разным DPI рамка может измениться.
+            // Только в этом случае нужна дополнительная коррекция.
+            if (dpi != Win32.GetDpiForWindow(hwnd) && !IsAtTargetPosition(hwnd, rect, 1))
             {
-                // dl/dt/dr/db — ширина невидимых рамок: dl < 0 означает рамку слева.
-                // Видимая часть = outer + смещения, поэтому внешний размер должен быть
-                // БОЛЬШЕ целевого на сумму рамок: w - dl + dr (а не w - dl - dr,
-                // иначе окно получается на 2×рамку уже и появляются лишние зазоры).
-                int dl = outer.Left - visible.Left, dt = outer.Top - visible.Top;
-                int dr = outer.Right - visible.Right, db = outer.Bottom - visible.Bottom;
-                if (dl != 0 || dt != 0 || dr != 0 || db != 0)
-                    return Win32.SetWindowPos(hwnd, z, x + dl, y + dt,
-                        Math.Max(1, w - dl + dr), Math.Max(1, h - dt + db),
-                        flags);
+                var updatedFrame = GetFrameOffsets(hwnd);
+                if (frame == updatedFrame) return true;
+                return Win32.SetWindowPos(hwnd, z, x + updatedFrame.Left, y + updatedFrame.Top,
+                    Math.Max(1, w - updatedFrame.Left + updatedFrame.Right),
+                    Math.Max(1, h - updatedFrame.Top + updatedFrame.Bottom), flags);
             }
             return true;
         }
@@ -435,6 +441,16 @@ public static class LayoutApplier
             DebugLog.Line($"  MoveTo {hwnd}: {ex.Message}");
             return false;
         }
+    }
+
+    private static (int Left, int Top, int Right, int Bottom) GetFrameOffsets(IntPtr hwnd)
+    {
+        if (Win32.GetWindowRect(hwnd, out var outer) &&
+            Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_EXTENDED_FRAME_BOUNDS,
+                out Win32.RECT visible, Marshal.SizeOf<Win32.RECT>()) == 0)
+            return (outer.Left - visible.Left, outer.Top - visible.Top,
+                outer.Right - visible.Right, outer.Bottom - visible.Bottom);
+        return default;
     }
 
     /// <summary>Видимые границы окна (без невидимых рамок тени DWM); при неудаче — весь прямоугольник.</summary>

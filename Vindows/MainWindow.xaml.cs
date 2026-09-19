@@ -33,6 +33,7 @@ public partial class MainWindow : Window
     private MonitorLayout? _currentLayout;
     private GripData? _dragGrip;
     private Point _dragLast;
+    private bool _splitterChanged;
     private bool _initialized;
     private bool _isExiting;
     private readonly Forms.NotifyIcon _trayIcon;
@@ -63,6 +64,7 @@ public partial class MainWindow : Window
         // Когда пользователь выбирает наше окно — поднимаем его поверх расставленных окон.
         Activated += (_, _) => { if (TopmostCheck.IsChecked == true) RaiseToTopmost(); };
         _watcher.StateChanged += RefreshZoneStatuses;
+        PreviewCanvas.LostMouseCapture += (_, _) => FinishSplitterDrag();
     }
 
     private void ApplyRoundedWindowCorners()
@@ -404,41 +406,57 @@ public partial class MainWindow : Window
         for (int r = 0; r < rows - 1; r++)
         {
             var zone = zones[r * cols];
-            double sepY = oy + (zone.Y + zone.Height) / 100.0 * waH;
+            var below = zones[(r + 1) * cols];
+            double sepY = oy + (zone.Y + zone.Height + below.Y) / 200.0 * waH;
             var line = new Rectangle { Width = waW, Height = 1, Fill = lineBrush };
             Canvas.SetLeft(line, ox);
             Canvas.SetTop(line, sepY);
             PreviewCanvas.Children.Add(line);
-            PreviewCanvas.Children.Add(CreateGrip(new GripData(false, r), ox + waW / 2, sepY));
+            for (int c = 0; c < cols; c++)
+            {
+                var cell = zones[r * cols + c];
+                PreviewCanvas.Children.Add(CreateGrip(new GripData(false, r),
+                    ox + (cell.X + cell.Width / 2) / 100.0 * waW, sepY,
+                    cell.Width / 100.0 * waW));
+            }
         }
 
         // Вертикальные разделители (между колонками) — поверх горизонтальных.
         for (int c = 0; c < cols - 1; c++)
         {
             var zone = zones[c];
-            double sepX = ox + (zone.X + zone.Width) / 100.0 * waW;
+            var right = zones[c + 1];
+            double sepX = ox + (zone.X + zone.Width + right.X) / 200.0 * waW;
             var line = new Rectangle { Width = 1, Height = waH, Fill = lineBrush };
             Canvas.SetLeft(line, sepX);
             Canvas.SetTop(line, oy);
             PreviewCanvas.Children.Add(line);
-            PreviewCanvas.Children.Add(CreateGrip(new GripData(true, c), sepX, oy + waH / 2));
+            for (int r = 0; r < rows; r++)
+            {
+                var cell = zones[r * cols + c];
+                PreviewCanvas.Children.Add(CreateGrip(new GripData(true, c), sepX,
+                    oy + (cell.Y + cell.Height / 2) / 100.0 * waH,
+                    cell.Height / 100.0 * waH));
+            }
         }
     }
 
     /// <summary>Создаёт ручку разделителя: прозрачная зона захвата с видимым «гроуфером».</summary>
-    private FrameworkElement CreateGrip(GripData data, double x, double y)
+    private FrameworkElement CreateGrip(GripData data, double x, double y, double segmentLength)
     {
         bool vertical = data.IsVertical;
+        double length = Math.Max(1, segmentLength - 12);
         var hitArea = new Border
         {
-            Width = vertical ? 22 : 56,
-            Height = vertical ? 56 : 22,
+            Width = vertical ? 16 : length,
+            Height = vertical ? length : 16,
             Background = Brushes.Transparent,
             Cursor = vertical ? Cursors.SizeWE : Cursors.SizeNS,
+            ToolTip = vertical ? "Изменить ширину соседних колонок" : "Изменить высоту соседних строк",
             Child = new Border
             {
-                Width = vertical ? 8 : 30,
-                Height = vertical ? 30 : 8,
+                Width = vertical ? 8 : Math.Min(30, length),
+                Height = vertical ? Math.Min(30, length) : 8,
                 CornerRadius = new CornerRadius(4),
                 Background = new SolidColorBrush(Color.FromRgb(0x2B, 0x7C, 0xD3)),
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -540,9 +558,14 @@ public partial class MainWindow : Window
 
     private void RefreshMonitors(bool showStatus)
     {
+        var detected = Win32.GetMonitors();
+        // Фоновый опрос не должен заново расставлять окна и перестраивать
+        // предпросмотр, когда конфигурация экранов осталась прежней.
+        if (!showStatus && HaveSameMonitors(_monitors, detected)) return;
+        if (_dragGrip != null) return;
         var selectedDevice = _currentMonitor?.DeviceName;
         _monitors.Clear();
-        _monitors.AddRange(Win32.GetMonitors());
+        _monitors.AddRange(detected);
         foreach (var m in _monitors)
             GetLayoutFor(m);
 
@@ -565,6 +588,12 @@ public partial class MainWindow : Window
                 StatusText.Text = $"Мониторов: {_monitors.Count}. Список обновлён из системы.";
         }
     }
+
+    internal static bool HaveSameMonitors(IReadOnlyList<MonitorInfo> current, IReadOnlyList<MonitorInfo> detected) =>
+        current.Count == detected.Count && current.All(old => detected.Any(next =>
+            old.DeviceName == next.DeviceName && old.Handle == next.Handle &&
+            old.Bounds == next.Bounds && old.WorkArea == next.WorkArea &&
+            old.Index == next.Index && old.DisplayName == next.DisplayName));
 
     private void ApplyBtn_Click(object sender, RoutedEventArgs e)
     {
@@ -767,6 +796,7 @@ public partial class MainWindow : Window
         if (grip == null) return;
 
         _dragGrip = grip;
+        _splitterChanged = false;
         _dragLast = e.GetPosition(PreviewCanvas);
         Mouse.OverrideCursor = grip.IsVertical ? Cursors.SizeWE : Cursors.SizeNS;
         PreviewCanvas.CaptureMouse();
@@ -789,6 +819,7 @@ public partial class MainWindow : Window
             ? LayoutApplier.MoveVerticalSplitter(_currentLayout.Zones, _currentLayout.Columns, _dragGrip.Index, delta)
             : LayoutApplier.MoveHorizontalSplitter(_currentLayout.Zones, _currentLayout.Columns, _dragGrip.Index, delta);
         if (Math.Abs(applied) < 1e-9) return;
+        _splitterChanged = true;
 
         // Сдвигаем точку отсчёта ровно на применённую величину, чтобы ручка не отставала от курсора
         // при упоре в минимальный размер области.
@@ -804,12 +835,19 @@ public partial class MainWindow : Window
     private void PreviewCanvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
         if (_dragGrip == null) return;
+        e.Handled = true;
+        FinishSplitterDrag();
+    }
 
+    private void FinishSplitterDrag()
+    {
+        if (_dragGrip == null) return;
         var grip = _dragGrip;
         _dragGrip = null;
         PreviewCanvas.ReleaseMouseCapture();
         Mouse.OverrideCursor = null;
-        e.Handled = true;
+        if (!_splitterChanged) return;
+        _splitterChanged = false;
 
         RebuildZoneList();
         if (ControlCheck.IsChecked == true)
